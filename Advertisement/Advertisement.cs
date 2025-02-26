@@ -22,6 +22,7 @@ using Server = CounterStrikeSharp.API.Server;
 
 namespace Advertisement;
 
+// Класс для хранения текущего состояния игрока
 public class User
 {
     public bool HtmlPrint { get; set; }
@@ -34,31 +35,41 @@ public class Ads : BasePlugin
 {
     public override string ModuleAuthor => "thesamefabius & Armatura";
     public override string ModuleName => "Advertisement";
-    public override string ModuleVersion => "v1.1.1";
+    public override string ModuleVersion => "v1.2.0";
 
     private readonly List<Timer> _timers = new();
     private readonly List<Timer> _serverTimers = new();
 
+    // Для определения страны/города
     private readonly Dictionary<ulong, string> _playerIsoCode = new();
     private readonly Dictionary<ulong, string> _playerCity = new();
 
-    // Кеш для результатов опросов серверов.
-    // Ключ – (ip, port), значение – последний сформированный текст.
+    // Кеш для результатов опросов серверов
+    // Ключ – (ip, port), значение – последний сформированный текст (или пусто, если ошибка)
     private readonly Dictionary<(string, int), string> _serverStatusCache = new();
 
+    // Пользовательские данные по слотам
     private readonly User?[] _users = new User?[66];
+
     public Config Config { get; set; } = null!;
 
     public override void Load(bool hotReload)
     {
+        // Загружаем конфиг
         Config = LoadConfig();
 
+        // Регистрируем различные события
         RegisterEventHandler<EventPlayerConnectFull>(EventPlayerConnectFull);
         RegisterEventHandler<EventPlayerDisconnect>(EventPlayerDisconnect);
 
         RegisterListener<Listeners.OnClientAuthorized>(OnClientAuthorized);
         RegisterListener<Listeners.OnTick>(OnTick);
 
+        // 1) Сразу делаем начальный опрос серверов (без анонса)
+        //    чтобы при первом !servers у нас уже было что показать в кеше
+        InitialServerQuery();
+
+        // 2) Запускаем таймеры для рекламы и таймеры для повторного опроса
         StartTimers();
         StartServerTimers();
 
@@ -68,6 +79,8 @@ public class Ads : BasePlugin
                 _users[player.Slot] = new User();
         }
     }
+
+    // --- События игрока ---
 
     private HookResult EventPlayerDisconnect(EventPlayerDisconnect ev, GameEventInfo info)
     {
@@ -94,7 +107,8 @@ public class Ads : BasePlugin
 
     private HookResult EventPlayerConnectFull(EventPlayerConnectFull ev, GameEventInfo info)
     {
-        if (Config.WelcomeMessage == null)
+        // Если WelcomeMessage отсутствует или пустая, ничего не выводим
+        if (Config.WelcomeMessage == null || string.IsNullOrEmpty(Config.WelcomeMessage.Message))
             return HookResult.Continue;
 
         var player = ev.Userid;
@@ -106,14 +120,14 @@ public class Ads : BasePlugin
         var msg = welcomeMsg.Message
             .Replace("{PLAYERNAME}", player.PlayerName)
             .ReplaceColorTags();
+
         PrintWrappedLine(0, msg, player, true);
 
-        // Рассылаем всем сообщение о его стране/городе
+        // Если ConnectAnnounce не пуст, оповестим всех о стране/городе
         if (!string.IsNullOrEmpty(Config.ConnectAnnounce))
         {
-            var steam64 = player.SteamID;
-            if (_playerIsoCode.TryGetValue(steam64, out var country) &&
-                _playerCity.TryGetValue(steam64, out var city))
+            if (_playerIsoCode.TryGetValue(player.SteamID, out var country) &&
+                _playerCity.TryGetValue(player.SteamID, out var city))
             {
                 var connectMsg = Config.ConnectAnnounce
                     .Replace("{PLAYERNAME}", player.PlayerName)
@@ -121,13 +135,207 @@ public class Ads : BasePlugin
                     .Replace("{CITY}", city)
                     .ReplaceColorTags();
 
-                foreach (var p in Utilities.GetPlayers().Where(u => !u.IsBot && u.IsValid))
-                    Server.PrintToChatAll(connectMsg);
+                // Всем игрокам:
+                Server.PrintToChatAll(connectMsg);
             }
         }
 
         return HookResult.Continue;
     }
+
+    // --- Основные таймеры ---
+
+    private void StartTimers()
+    {
+        if (Config.Ads == null) return;
+        foreach (var ad in Config.Ads)
+        {
+            _timers.Add(AddTimer(ad.Interval, () => ShowAd(ad), TimerFlags.REPEAT));
+        }
+    }
+
+    private void ShowAd(Advertisement ad)
+    {
+        var messages = ad.NextMessages;
+        foreach (var (type, message) in messages)
+        {
+            switch (type)
+            {
+                case "Chat":
+                    PrintWrappedLine(HudDestination.Chat, message);
+                    break;
+                case "Center":
+                    PrintWrappedLine(HudDestination.Center, message);
+                    break;
+            }
+        }
+    }
+
+    // Опрос серверов по таймеру и их реклама
+    private void StartServerTimers()
+    {
+        if (Config.Servers == null) return;
+
+        foreach (var serverInfo in Config.Servers)
+        {
+            // Каждые serverInfo.Interval секунд делаем опрос
+            _serverTimers.Add(AddTimer(serverInfo.Interval, () =>
+            {
+                // Обновляем кеш (QueryServer)
+                var success = QueryServer(serverInfo);
+                // Если успешно, анонсируем всем (AnnounceServersInChat) с титулом (если есть)
+                if (success)
+                    AnnounceServersInChat(isAd: true);
+            }, TimerFlags.REPEAT));
+        }
+    }
+
+    // --- Команды ---
+
+    // Команда для игрока: !servers
+    [CommandHelper(whoCanExecute: CommandUsage.CLIENT_ONLY)]
+    [ConsoleCommand("css_servers", "Показать список серверов из кеша")]
+    public void ShowServersCommand(CCSPlayerController? controller, CommandInfo command)
+    {
+        if (controller == null) return;
+
+        if (Config.Servers == null || Config.Servers.Count == 0)
+            return;
+
+        // Печатаем СТРОГО без заголовка, только контент
+        AnnounceServersToPlayer(controller, isAd: false);
+    }
+
+    // Команда перезагрузки конфига
+    [RequiresPermissions("@css/root")]
+    [ConsoleCommand("css_advert_reload", "configuration restart")]
+    public void ReloadAdvertConfig(CCSPlayerController? controller, CommandInfo command)
+    {
+        Config = LoadConfig();
+
+        foreach (var t in _timers) t.Kill();
+        _timers.Clear();
+
+        foreach (var t in _serverTimers) t.Kill();
+        _serverTimers.Clear();
+
+        _serverStatusCache.Clear(); // очистим кеш при перезагрузке
+
+        // Повторно подгрузим язык/город для текущих игроков
+        foreach (var player in Utilities.GetPlayers())
+        {
+            if (player.IpAddress == null || player.AuthorizedSteamID == null)
+                continue;
+
+            var ip = player.IpAddress.Split(':')[0];
+            _playerIsoCode[player.AuthorizedSteamID.SteamId64] = GetPlayerIsoCode(ip);
+            _playerCity[player.AuthorizedSteamID.SteamId64] = GetPlayerCity(ip);
+        }
+
+        // После Reload заново делаем начальный опрос
+        InitialServerQuery();
+
+        // И включаем таймеры
+        StartTimers();
+        StartServerTimers();
+
+        const string msg = "[Advertisement] configuration successfully rebooted!";
+        if (controller == null)
+            Console.WriteLine(msg);
+        else
+            controller.PrintToChat(msg);
+    }
+
+    // --- Опрос серверов ---
+
+    /// <summary>Единоразовый начальный опрос всех серверов (без анонса).</summary>
+    private void InitialServerQuery()
+    {
+        if (Config.Servers == null) return;
+
+        foreach (var serverInfo in Config.Servers)
+        {
+            QueryServer(serverInfo); // просто заполняем кеш, не выводим в чат
+        }
+    }
+
+    /// <summary>Опрос одного сервера, заполнение кеша.</summary>
+    /// <returns>true, если удалось получить инфу</returns>
+    private bool QueryServer(ServerInfo serverInfo)
+    {
+        try
+        {
+            var info = AdvancedA2S.GetServerInfo(serverInfo.Ip, (ushort)serverInfo.Port);
+            if (info == null)
+            {
+                Console.WriteLine($"[Ads] {serverInfo.Ip}:{serverInfo.Port} -> info == null");
+                _serverStatusCache.Remove((serverInfo.Ip, serverInfo.Port));
+                return false;
+            }
+
+            // Сформируем строку по шаблону
+            var msg = serverInfo.MessageTemplate
+                .Replace("{SERVER_IP}", serverInfo.Ip)
+                .Replace("{SERVER_PORT}", serverInfo.Port.ToString())
+                .Replace("{SERVER_MAP}", info.Map)
+                .Replace("{SERVER_PLAYERS}", info.Players.ToString())
+                .Replace("{SERVER_MAXPLAYERS}", info.MaxPlayers.ToString()).ReplaceColorTags();
+
+            _serverStatusCache[(serverInfo.Ip, serverInfo.Port)] = msg;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Ads] Ошибка опроса {serverInfo.Ip}:{serverInfo.Port} => {ex.Message}");
+            _serverStatusCache.Remove((serverInfo.Ip, serverInfo.Port));
+            return false;
+        }
+    }
+
+    // --- Вывод списка серверов ---
+
+    /// <summary>Анонсируем ВСЕМ игрокам (либо с заголовком, если isAd=true) список серверов из кеша.</summary>
+    private void AnnounceServersInChat(bool isAd)
+    {
+        var players = Utilities.GetPlayers().Where(u => !u.IsBot && u.IsValid);
+        if (!players.Any()) return; // никто не увидит
+
+        // Если в конфиге прописан заголовок и это реклама — выведем его
+        if (isAd && !string.IsNullOrEmpty(Config.TitleAnnounceServers))
+        {
+            Server.PrintToChatAll(Config.TitleAnnounceServers!.ReplaceColorTags());
+        }
+
+        // Теперь выводим строки из кеша
+        foreach (var pair in _serverStatusCache)
+        {
+            var msg = pair.Value;
+            if (!string.IsNullOrEmpty(msg))
+                Server.PrintToChatAll(msg.ReplaceColorTags());
+        }
+    }
+
+    /// <summary>Анонсируем ОДНОМУ игроку (без заголовка, если isAd=false) список серверов из кеша.</summary>
+    private void AnnounceServersToPlayer(CCSPlayerController controller, bool isAd)
+    {
+        // Если реклама и есть заголовок — выводим, иначе пропускаем
+        if (isAd && !string.IsNullOrEmpty(Config.TitleAnnounceServers))
+        {
+            controller.PrintToChat(Config.TitleAnnounceServers!.ReplaceColorTags());
+        }
+
+        // Выводим строки из кеша
+        foreach (var pair in _serverStatusCache)
+        {
+            var msg = pair.Value;
+            if (!string.IsNullOrEmpty(msg))
+            {
+                controller.PrintToChat(msg.ReplaceColorTags());
+            }
+        }
+    }
+
+    // --- Логика вывода рекламы (OnTick и т.д.) ---
 
     private void OnTick()
     {
@@ -156,146 +364,16 @@ public class Ads : BasePlugin
         }
     }
 
-    private void StartTimers()
-    {
-        if (Config.Ads == null) return;
-        foreach (var ad in Config.Ads)
-            _timers.Add(AddTimer(ad.Interval, () => ShowAd(ad), TimerFlags.REPEAT));
-    }
-
-    private void ShowAd(Advertisement ad)
-    {
-        var messages = ad.NextMessages;
-        foreach (var (type, message) in messages)
-        {
-            switch (type)
-            {
-                case "Chat":
-                    PrintWrappedLine(HudDestination.Chat, message);
-                    break;
-                case "Center":
-                    PrintWrappedLine(HudDestination.Center, message);
-                    break;
-            }
-        }
-    }
-
-    private void StartServerTimers()
-    {
-        if (Config.Servers == null) return;
-        foreach (var serverInfo in Config.Servers)
-        {
-            _serverTimers.Add(AddTimer(serverInfo.Interval,
-                () => QueryAndAnnounceServer(serverInfo),
-                TimerFlags.REPEAT));
-        }
-    }
-
-    private void QueryAndAnnounceServer(ServerInfo serverInfo)
-    {
-        try
-        {
-            var info = AdvancedA2S.GetServerInfo(serverInfo.Ip, (ushort)serverInfo.Port);
-
-            if (info == null)
-            {
-                Console.WriteLine("GetInfo() вернул null (сервер не ответил или не поддерживает запрос).");
-                throw new NullReferenceException("info == null");
-            }
-
-            // Выведем в консоль поля info
-            Console.WriteLine("--- GetInfo() data ---");
-            Console.WriteLine($"Map: {info.Map}");
-            Console.WriteLine($"Players: {info.Players}");
-            Console.WriteLine($"MaxPlayers: {info.MaxPlayers}");
-            Console.WriteLine("----------------------");
-
-            // Формируем сообщение по вашему шаблону
-            var msg = serverInfo.MessageTemplate
-                .Replace("{SERVER_IP}", serverInfo.Ip)
-                .Replace("{SERVER_PORT}", serverInfo.Port.ToString())
-                .Replace("{SERVER_MAP}", info.Map)
-                .Replace("{SERVER_PLAYERS}", info.Players.ToString())
-                .Replace("{SERVER_MAXPLAYERS}", info.MaxPlayers.ToString());
-
-            // Сохраняем в кеш (если он у вас есть)
-            _serverStatusCache[(serverInfo.Ip, serverInfo.Port)] = msg;
-
-            // Рассылаем всем в чат
-            foreach (var p in Utilities.GetPlayers().Where(u => !u.IsBot && u.IsValid))
-                p.PrintToChat(msg);
-        }
-        catch (Exception ex)
-        { ;
-            _serverStatusCache.Remove((serverInfo.Ip, serverInfo.Port));
-            Console.WriteLine($"[Ads] Ошибка опроса {serverInfo.Ip}:{serverInfo.Port} => {ex.Message}");
-        }
-    }
-
-    [CommandHelper(whoCanExecute: CommandUsage.CLIENT_ONLY)]
-    [ConsoleCommand("css_servers", "Показать список серверов из кеша")]
-    public void ShowServersCommand(CCSPlayerController? controller, CommandInfo command)
-    {
-        if (controller == null) return;
-
-        if (Config.Servers == null || Config.Servers.Count == 0)
-        {
-            return;
-        }
-
-        foreach (var server in Config.Servers)
-        {
-            if (_serverStatusCache.TryGetValue((server.Ip, server.Port), out var cachedMsg))
-            {
-                controller.PrintToChat(cachedMsg);
-                controller.ExecuteClientCommand("connect " + server.Ip + ":" + server.Port);
-                return;
-            }
-        }
-    }
-
-    [RequiresPermissions("@css/root")]
-    [ConsoleCommand("css_advert_reload", "configuration restart")]
-    public void ReloadAdvertConfig(CCSPlayerController? controller, CommandInfo command)
-    {
-        Config = LoadConfig();
-
-        foreach (var t in _timers) t.Kill();
-        _timers.Clear();
-
-        foreach (var t in _serverTimers) t.Kill();
-        _serverTimers.Clear();
-
-        _serverStatusCache.Clear(); // очистим кеш при перезагрузке
-
-        StartTimers();
-        StartServerTimers();
-
-        // Повторно подгрузим страну/город для текущих игроков
-        foreach (var player in Utilities.GetPlayers())
-        {
-            if (player.IpAddress == null || player.AuthorizedSteamID == null)
-                continue;
-
-            var ip = player.IpAddress.Split(':')[0];
-            _playerIsoCode[player.AuthorizedSteamID.SteamId64] = GetPlayerIsoCode(ip);
-            _playerCity[player.AuthorizedSteamID.SteamId64] = GetPlayerCity(ip);
-        }
-
-        const string msg = "[Advertisement] configuration successfully rebooted!";
-        if (controller == null)
-            Console.WriteLine(msg);
-        else
-            controller.PrintToChat(msg);
-    }
+    // --- Вспомогательные методы ---
 
     private void PrintWrappedLine(HudDestination? destination, string message,
         CCSPlayerController? connectPlayer = null, bool isWelcome = false)
     {
+        // Если это личное приветствие
         if (connectPlayer != null && !connectPlayer.IsBot && isWelcome)
         {
             var welcomeMessage = Config.WelcomeMessage;
-            if (welcomeMessage is null) return;
+            if (welcomeMessage == null || string.IsNullOrEmpty(welcomeMessage.Message)) return;
 
             AddTimer(welcomeMessage.DisplayDelay, () =>
             {
@@ -320,13 +398,14 @@ public class Ads : BasePlugin
         }
         else
         {
+            // Обычные сообщения всем игрокам
             foreach (var player in Utilities.GetPlayers()
                          .Where(u => !isWelcome && !u.IsBot && u.IsValid))
             {
                 var processed = ProcessMessage(message, player.SteamID);
                 if (destination == HudDestination.Chat)
                 {
-                    player.PrintToChat(" " + processed);
+                    player.PrintToChat(processed);
                 }
                 else
                 {
@@ -355,16 +434,19 @@ public class Ads : BasePlugin
 
     private string ProcessMessage(string message, ulong steamId)
     {
+        // Если нет мульти-язычных сообщений, сразу подставим {MAP}, {TIME} и т.д.
         if (Config.LanguageMessages == null)
             return ReplaceMessageTags(message);
 
+        // Иначе ищем теги {tag} => и пробуем найти их переводы
         var matches = Regex.Matches(message, @"\{([^}]*)\}");
         foreach (Match match in matches)
         {
             var tag = match.Groups[0].Value;
             var tagName = match.Groups[1].Value;
 
-            if (!Config.LanguageMessages.TryGetValue(tagName, out var language)) continue;
+            if (!Config.LanguageMessages.TryGetValue(tagName, out var language))
+                continue;
 
             var isoCode = _playerIsoCode.TryGetValue(steamId, out var code)
                 ? code
@@ -474,13 +556,14 @@ public class Ads : BasePlugin
                 ["de_dust"] = "Dust II"
             },
             ConnectAnnounce = "Игрок {PLAYERNAME} зашёл из {COUNTRY}, {CITY}",
+            TitleAnnounceServers = "Список серверов:",
             Servers = new List<ServerInfo>
             {
                 new ServerInfo
                 {
                     Ip = "127.0.0.1",
                     Port = 27015,
-                    Interval = 60,
+                    Interval = 120,
                     MessageTemplate = "{SERVER_IP}:{SERVER_PORT} - {SERVER_MAP} | {SERVER_PLAYERS}/{SERVER_MAXPLAYERS}"
                 }
             }
@@ -533,7 +616,7 @@ public class Ads : BasePlugin
     }
 }
 
-// Конфиг
+// ----------------- Конфигурация -------------------
 public class Config
 {
     public bool? PrintToCenterHtml { get; init; }
@@ -547,10 +630,12 @@ public class Config
     public Dictionary<string, string>? MapsName { get; init; }
 
     // Новые поля
+    public string? TitleAnnounceServers { get; set; }
     public List<ServerInfo>? Servers { get; set; }
     public string? ConnectAnnounce { get; set; }
 }
 
+// Параметры приветствия
 public class WelcomeMessage
 {
     public MessageType MessageType { get; init; }
@@ -558,15 +643,18 @@ public class WelcomeMessage
     public float DisplayDelay { get; set; } = 2;
 }
 
+// Блок рекламы
 public class Advertisement
 {
     public float Interval { get; init; }
     public List<Dictionary<string, string>> Messages { get; init; } = null!;
 
     private int _currentMessageIndex;
-    [JsonIgnore] public Dictionary<string, string> NextMessages => Messages[_currentMessageIndex++ % Messages.Count];
+    [JsonIgnore]
+    public Dictionary<string, string> NextMessages => Messages[_currentMessageIndex++ % Messages.Count];
 }
 
+// Типы сообщений
 public enum MessageType
 {
     Chat = 0,
@@ -574,10 +662,11 @@ public enum MessageType
     CenterHtml
 }
 
+// Данные о внешнем сервере
 public class ServerInfo
 {
     public string Ip { get; set; } = "";
     public int Port { get; set; }
-    public float Interval { get; set; }
+    public float Interval { get; set; }   // как часто опрашивать
     public string MessageTemplate { get; set; } = "";
 }
