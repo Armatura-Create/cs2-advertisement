@@ -8,6 +8,7 @@ using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
+using CounterStrikeSharp.API.Core.Attributes;
 using CounterStrikeSharp.API.Core.Attributes.Registration;
 using CounterStrikeSharp.API.Core.Translations;
 using CounterStrikeSharp.API.Modules.Admin;
@@ -17,6 +18,9 @@ using CounterStrikeSharp.API.Modules.Entities;
 using CounterStrikeSharp.API.Modules.Timers;
 using CounterStrikeSharp.API.Modules.Utils;
 using MaxMind.GeoIP2;
+using QueryMaster;
+using QueryMaster.GameServer;
+using Server = CounterStrikeSharp.API.Server;
 
 namespace Advertisement;
 
@@ -27,23 +31,29 @@ public class User
     public int PrintTime { get; set; }
 }
 
+[MinimumApiVersion(305)]
 public class Ads : BasePlugin
 {
-    public override string ModuleAuthor => "thesamefabius";
+    public override string ModuleAuthor => "thesamefabius & Armatura";
     public override string ModuleName => "Advertisement";
-    public override string ModuleVersion => "v1.0.8";
+    public override string ModuleVersion => "v1.1.1";
 
     private readonly List<Timer> _timers = new();
-    private readonly Dictionary<ulong, string> _playerIsoCode = new();
+    private readonly List<Timer> _serverTimers = new();
 
-    public Config Config { get; set; }
+    private readonly Dictionary<ulong, string> _playerIsoCode = new();
+    private readonly Dictionary<ulong, string> _playerCity = new();
+
+    // Кеш для результатов опросов серверов.
+    // Ключ – (ip, port), значение – последний сформированный текст.
+    private readonly Dictionary<(string, int), string> _serverStatusCache = new();
 
     private readonly User?[] _users = new User?[66];
+    public Config Config { get; set; } = null!;
 
     public override void Load(bool hotReload)
     {
         Config = LoadConfig();
-        Console.WriteLine(Config.Panel == null);
 
         RegisterEventHandler<EventPlayerConnectFull>(EventPlayerConnectFull);
         RegisterEventHandler<EventPlayerDisconnect>(EventPlayerDisconnect);
@@ -52,23 +62,22 @@ public class Ads : BasePlugin
         RegisterListener<Listeners.OnTick>(OnTick);
 
         StartTimers();
+        StartServerTimers();
 
         if (hotReload)
         {
             foreach (var player in Utilities.GetPlayers())
-            {
                 _users[player.Slot] = new User();
-            }
         }
     }
 
-    private HookResult EventPlayerDisconnect(EventPlayerDisconnect @event, GameEventInfo info)
+    private HookResult EventPlayerDisconnect(EventPlayerDisconnect ev, GameEventInfo info)
     {
-        if (Config.LanguageMessages == null) return HookResult.Continue;
-        var player = @event.Userid;
+        var player = ev.Userid;
         if (player is null) return HookResult.Continue;
 
         _playerIsoCode.Remove(player.SteamID);
+        _playerCity.Remove(player.SteamID);
 
         return HookResult.Continue;
     }
@@ -78,23 +87,46 @@ public class Ads : BasePlugin
         var player = Utilities.GetPlayerFromSlot(slot);
         _users[slot] = new User();
 
-        if (Config.LanguageMessages == null) return;
+        if (player?.IpAddress == null) return;
 
-        if (player is not null && player.IpAddress != null)
-            _playerIsoCode.TryAdd(id.SteamId64, GetPlayerIsoCode(player.IpAddress.Split(':')[0]));
+        var ip = player.IpAddress.Split(':')[0];
+        _playerIsoCode.TryAdd(id.SteamId64, GetPlayerIsoCode(ip));
+        _playerCity.TryAdd(id.SteamId64, GetPlayerCity(ip));
     }
 
-    private HookResult EventPlayerConnectFull(EventPlayerConnectFull @event, GameEventInfo info)
+    private HookResult EventPlayerConnectFull(EventPlayerConnectFull ev, GameEventInfo info)
     {
-        if (Config.WelcomeMessage == null) return HookResult.Continue;
+        if (Config.WelcomeMessage == null)
+            return HookResult.Continue;
 
-        var player = @event.Userid;
-        if (player is null || !player.IsValid || player.SteamID == null) return HookResult.Continue;
+        var player = ev.Userid;
+        if (player is null || !player.IsValid)
+            return HookResult.Continue;
 
+        // Приветственное сообщение лично подключившемуся
         var welcomeMsg = Config.WelcomeMessage;
-        var msg = welcomeMsg.Message.Replace("{PLAYERNAME}", player.PlayerName).ReplaceColorTags();
-
+        var msg = welcomeMsg.Message
+            .Replace("{PLAYERNAME}", player.PlayerName)
+            .ReplaceColorTags();
         PrintWrappedLine(0, msg, player, true);
+
+        // Рассылаем всем сообщение о его стране/городе
+        if (!string.IsNullOrEmpty(Config.ConnectAnnounce))
+        {
+            var steam64 = player.SteamID;
+            if (_playerIsoCode.TryGetValue(steam64, out var country) &&
+                _playerCity.TryGetValue(steam64, out var city))
+            {
+                var connectMsg = Config.ConnectAnnounce
+                    .Replace("{PLAYERNAME}", player.PlayerName)
+                    .Replace("{COUNTRY}", country)
+                    .Replace("{CITY}", city)
+                    .ReplaceColorTags();
+
+                foreach (var p in Utilities.GetPlayers().Where(u => !u.IsBot && u.IsValid))
+                    Server.PrintToChatAll(connectMsg);
+            }
+        }
 
         return HookResult.Continue;
     }
@@ -104,12 +136,14 @@ public class Ads : BasePlugin
         foreach (var player in Utilities.GetPlayers())
         {
             var user = _users[player.Slot];
-            var showWhenDead = Config.ShowHtmlWhenDead;
-            if (user is not null && 
-                user.HtmlPrint && 
-                (showWhenDead is null || showWhenDead == false ||
-                 (showWhenDead == true && !player.PawnIsAlive)))
+            if (user == null) continue;
+
+            if (user.HtmlPrint)
             {
+                var showWhenDead = Config.ShowHtmlWhenDead ?? false;
+                if (!showWhenDead && !player.PawnIsAlive)
+                    continue;
+
                 var duration = Config.HtmlCenterDuration;
                 if (duration != null && TimeSpan.FromSeconds(user.PrintTime / 64.0).Seconds < duration.Value)
                 {
@@ -124,29 +158,114 @@ public class Ads : BasePlugin
         }
     }
 
+    private void StartTimers()
+    {
+        if (Config.Ads == null) return;
+        foreach (var ad in Config.Ads)
+            _timers.Add(AddTimer(ad.Interval, () => ShowAd(ad), TimerFlags.REPEAT));
+    }
+
     private void ShowAd(Advertisement ad)
     {
         var messages = ad.NextMessages;
-
         foreach (var (type, message) in messages)
         {
             switch (type)
             {
                 case "Chat":
-                    PrintWrappedLine(destination: HudDestination.Chat, message: message);
+                    PrintWrappedLine(HudDestination.Chat, message);
                     break;
                 case "Center":
-                    PrintWrappedLine(destination: HudDestination.Center, message: message);
+                    PrintWrappedLine(HudDestination.Center, message);
                     break;
             }
         }
     }
 
-    private void StartTimers()
+    private void StartServerTimers()
     {
-        foreach (var ad in Config.Ads)
+        if (Config.Servers == null) return;
+        foreach (var serverInfo in Config.Servers)
         {
-            _timers.Add(AddTimer(ad.Interval, () => ShowAd(ad), TimerFlags.REPEAT));
+            _serverTimers.Add(AddTimer(serverInfo.Interval,
+                () => QueryAndAnnounceServer(serverInfo),
+                TimerFlags.REPEAT));
+        }
+    }
+    
+    private void QueryAndAnnounceServer(ServerInfo serverInfo)
+    {
+        try
+        {
+            using (var server = ServerQuery.GetServerInstance(
+                       EngineType.GoldSource, 
+                       serverInfo.Ip, 
+                       (ushort) serverInfo.Port,
+                       false,
+                       2000,
+                       2000,
+                       1))
+            {
+                var info = server.GetInfo();
+                if (info == null)
+                {
+                    Console.WriteLine("GetInfo() вернул null (сервер не ответил или не поддерживает запрос).");
+                    throw new NullReferenceException("info == null");
+                }
+
+                // Выведем в консоль поля info
+                Console.WriteLine("--- GetInfo() data ---");
+                Console.WriteLine($"Server Name: {info.Name}");
+                Console.WriteLine($"Map: {info.Map}");
+                Console.WriteLine($"Players: {info.Players}");
+                Console.WriteLine($"MaxPlayers: {info.MaxPlayers}");
+                Console.WriteLine($"ID: {info.Id}");
+                Console.WriteLine("----------------------");
+                
+                var players = server.GetPlayers();
+
+                // Формируем сообщение по вашему шаблону
+                var msg = serverInfo.MessageTemplate
+                    .Replace("{SERVER_IP}", serverInfo.Ip)
+                    .Replace("{SERVER_PORT}", serverInfo.Port.ToString())
+                    .Replace("{SERVER_NAME}", info.Name)
+                    .Replace("{SERVER_MAP}", info.Map)
+                    .Replace("{SERVER_PLAYERS}", info.Players.ToString())
+                    .Replace("{SERVER_MAXPLAYERS}", info.MaxPlayers.ToString());
+
+                // Сохраняем в кеш (если он у вас есть)
+                _serverStatusCache[(serverInfo.Ip, serverInfo.Port)] = msg;
+
+                // Рассылаем всем в чат
+                foreach (var p in Utilities.GetPlayers().Where(u => !u.IsBot && u.IsValid))
+                    p.PrintToChat(msg);
+            }
+        }
+        catch (Exception ex)
+        {
+            var errMsg = $"[{serverInfo.Ip}:{serverInfo.Port}] Error: {ex.Message}";
+            _serverStatusCache[(serverInfo.Ip, serverInfo.Port)] = errMsg;
+            Console.WriteLine($"[Ads] Ошибка опроса {serverInfo.Ip}:{serverInfo.Port} => {ex.Message}");
+        }
+    }
+
+    [CommandHelper(whoCanExecute: CommandUsage.CLIENT_ONLY)]
+    [ConsoleCommand("css_servers", "Показать список серверов из кеша")]
+    public void ShowServersCommand(CCSPlayerController? controller, CommandInfo command)
+    {
+        if (controller == null) return;
+
+        if (Config.Servers == null || Config.Servers.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var server in Config.Servers)
+        {
+            if (_serverStatusCache.TryGetValue((server.Ip, server.Port), out var cachedMsg))
+            {
+                controller.PrintToChat(cachedMsg);
+            }
         }
     }
 
@@ -156,23 +275,29 @@ public class Ads : BasePlugin
     {
         Config = LoadConfig();
 
-        foreach (var timer in _timers) timer.Kill();
+        foreach (var t in _timers) t.Kill();
         _timers.Clear();
+
+        foreach (var t in _serverTimers) t.Kill();
+        _serverTimers.Clear();
+
+        _serverStatusCache.Clear(); // очистим кеш при перезагрузке
+
         StartTimers();
+        StartServerTimers();
 
-        if (Config.LanguageMessages != null)
+        // Повторно подгрузим страну/город для текущих игроков
+        foreach (var player in Utilities.GetPlayers())
         {
-            foreach (var player in Utilities.GetPlayers())
-            {
-                if (player.IpAddress == null || player.AuthorizedSteamID == null) continue;
+            if (player.IpAddress == null || player.AuthorizedSteamID == null)
+                continue;
 
-                _playerIsoCode.TryAdd(player.AuthorizedSteamID.SteamId64,
-                    GetPlayerIsoCode(player.IpAddress.Split(':')[0]));
-            }
+            var ip = player.IpAddress.Split(':')[0];
+            _playerIsoCode[player.AuthorizedSteamID.SteamId64] = GetPlayerIsoCode(ip);
+            _playerCity[player.AuthorizedSteamID.SteamId64] = GetPlayerCity(ip);
         }
 
-        const string msg = "\x08[\x0C Advertisement \x08] configuration successfully rebooted!";
-
+        const string msg = "[Advertisement] configuration successfully rebooted!";
         if (controller == null)
             Console.WriteLine(msg);
         else
@@ -189,21 +314,21 @@ public class Ads : BasePlugin
 
             AddTimer(welcomeMessage.DisplayDelay, () =>
             {
-                if (connectPlayer == null || !connectPlayer.IsValid || connectPlayer.SteamID == null) return;
+                if (connectPlayer == null || !connectPlayer.IsValid) return;
 
-                var processedMessage = ProcessMessage(message, connectPlayer.SteamID)
+                var processed = ProcessMessage(message, connectPlayer.SteamID)
                     .Replace("{PLAYERNAME}", connectPlayer.PlayerName);
 
                 switch (welcomeMessage.MessageType)
                 {
                     case MessageType.Chat:
-                        connectPlayer.PrintToChat(processedMessage);
+                        connectPlayer.PrintToChat(processed);
                         break;
                     case MessageType.Center:
-                        connectPlayer.PrintToChat(processedMessage);
+                        connectPlayer.PrintToChat(processed);
                         break;
                     case MessageType.CenterHtml:
-                        SetHtmlPrintSettings(connectPlayer, processedMessage);
+                        SetHtmlPrintSettings(connectPlayer, processed);
                         break;
                 }
             });
@@ -211,20 +336,19 @@ public class Ads : BasePlugin
         else
         {
             foreach (var player in Utilities.GetPlayers()
-                         .Where(u => !isWelcome && !u.IsBot && u.IsValid && u.SteamID != null))
+                         .Where(u => !isWelcome && !u.IsBot && u.IsValid))
             {
-                var processedMessage = ProcessMessage(message, player.SteamID);
-
+                var processed = ProcessMessage(message, player.SteamID);
                 if (destination == HudDestination.Chat)
                 {
-                    player.PrintToChat($" {processedMessage}");
+                    player.PrintToChat(" " + processed);
                 }
                 else
                 {
-                    if (Config.PrintToCenterHtml != null && Config.PrintToCenterHtml.Value)
-                        SetHtmlPrintSettings(player, processedMessage);
+                    if (Config.PrintToCenterHtml == true)
+                        SetHtmlPrintSettings(player, processed);
                     else
-                        player.PrintToCenter(processedMessage);
+                        player.PrintToCenter(processed);
                 }
             }
         }
@@ -233,12 +357,12 @@ public class Ads : BasePlugin
     private void SetHtmlPrintSettings(CCSPlayerController player, string message)
     {
         var user = _users[player.Slot];
-        if (user is null)
+        if (user == null)
         {
             _users[player.Slot] = new User();
-            return;
+            user = _users[player.Slot];
         }
-        
+
         user.HtmlPrint = true;
         user.PrintTime = 0;
         user.Message = message;
@@ -246,10 +370,10 @@ public class Ads : BasePlugin
 
     private string ProcessMessage(string message, ulong steamId)
     {
-        if (Config.LanguageMessages == null) return ReplaceMessageTags(message);
+        if (Config.LanguageMessages == null)
+            return ReplaceMessageTags(message);
 
         var matches = Regex.Matches(message, @"\{([^}]*)\}");
-
         foreach (Match match in matches)
         {
             var tag = match.Groups[0].Value;
@@ -257,15 +381,15 @@ public class Ads : BasePlugin
 
             if (!Config.LanguageMessages.TryGetValue(tagName, out var language)) continue;
 
-            var isoCode = _playerIsoCode.TryGetValue(steamId, out var playerCountryIso)
-                ? playerCountryIso
+            var isoCode = _playerIsoCode.TryGetValue(steamId, out var code)
+                ? code
                 : Config.DefaultLang;
 
-            if (isoCode != null && language.TryGetValue(isoCode, out var tagReplacement))
-                message = message.Replace(tag, tagReplacement);
+            if (isoCode != null && language.TryGetValue(isoCode, out var replacement))
+                message = message.Replace(tag, replacement);
             else if (Config.DefaultLang != null &&
-                     language.TryGetValue(Config.DefaultLang, out var defaultReplacement))
-                message = message.Replace(tag, defaultReplacement);
+                     language.TryGetValue(Config.DefaultLang, out var defReplacement))
+                message = message.Replace(tag, defReplacement);
         }
 
         return ReplaceMessageTags(message);
@@ -274,28 +398,20 @@ public class Ads : BasePlugin
     private string ReplaceMessageTags(string message)
     {
         var mapName = NativeAPI.GetMapName();
-
         var replacedMessage = message
             .Replace("{MAP}", mapName)
             .Replace("{TIME}", DateTime.Now.ToString("HH:mm:ss"))
             .Replace("{DATE}", DateTime.Now.ToString("dd.MM.yyyy"))
-            .Replace("{SERVERNAME}", ConVar.Find("hostname")!.StringValue)
-            .Replace("{IP}", ConVar.Find("ip")!.StringValue)
-            .Replace("{PORT}", ConVar.Find("hostport")!.GetPrimitiveValue<int>().ToString())
+            .Replace("{SERVERNAME}", ConVar.Find("hostname")?.StringValue ?? "Server")
+            .Replace("{IP}", ConVar.Find("ip")?.StringValue ?? "127.0.0.1")
+            .Replace("{PORT}", ConVar.Find("hostport")?.GetPrimitiveValue<int>().ToString() ?? "27015")
             .Replace("{MAXPLAYERS}", Server.MaxPlayers.ToString())
-            .Replace("{PLAYERS}",
-                Utilities.GetPlayers().Count(u => u.PlayerPawn.Value != null && u.PlayerPawn.Value.IsValid).ToString())
-            .Replace("\n", "\u2029");
+            .Replace("{PLAYERS}", Utilities.GetPlayers().Count(u => u.PlayerPawn?.Value?.IsValid == true).ToString())
+            .Replace("\n", "\u2029")
+            .ReplaceColorTags();
 
-        replacedMessage = replacedMessage.ReplaceColorTags();
-
-        if (Config.MapsName != null)
-        {
-            foreach (var mapsName in Config.MapsName.Where(mapsName => mapName == mapsName.Key))
-            {
-                return replacedMessage.Replace(mapName, mapsName.Value);
-            }
-        }
+        if (Config.MapsName != null && Config.MapsName.TryGetValue(mapName, out var niceName))
+            replacedMessage = replacedMessage.Replace(mapName, niceName);
 
         return replacedMessage;
     }
@@ -306,13 +422,13 @@ public class Ads : BasePlugin
         Directory.CreateDirectory(directory);
 
         var configPath = Path.Combine(directory, "Advertisement.json");
+        if (!File.Exists(configPath))
+            return CreateConfig(configPath);
 
-        if (!File.Exists(configPath)) return CreateConfig(configPath);
-
-        var config = JsonSerializer.Deserialize<Config>(File.ReadAllText(configPath),
-            new JsonSerializerOptions { ReadCommentHandling = JsonCommentHandling.Skip })!;
-
-        return config;
+        var json = File.ReadAllText(configPath);
+        var config = JsonSerializer.Deserialize<Config>(json,
+            new JsonSerializerOptions { ReadCommentHandling = JsonCommentHandling.Skip });
+        return config ?? new Config();
     }
 
     private Config CreateConfig(string configPath)
@@ -322,8 +438,7 @@ public class Ads : BasePlugin
             PrintToCenterHtml = false,
             WelcomeMessage = new WelcomeMessage
             {
-                //0 - CHAT | 1 - CENTER | 2 - CENTER HTML
-                MessageType = 0,
+                MessageType = MessageType.Chat,
                 Message = "Welcome, {BLUE}{PLAYERNAME}",
                 DisplayDelay = 5
             },
@@ -334,15 +449,8 @@ public class Ads : BasePlugin
                     Interval = 35,
                     Messages = new List<Dictionary<string, string>>
                     {
-                        new()
-                        {
-                            ["Chat"] = "{map_name}",
-                            ["Center"] = "Section 1 Center 1"
-                        },
-                        new()
-                        {
-                            ["Chat"] = "{current_time}"
-                        }
+                        new() { ["Chat"] = "{map_name}", ["Center"] = "Section 1 Center 1" },
+                        new() { ["Chat"] = "{current_time}" }
                     }
                 },
                 new()
@@ -350,21 +458,13 @@ public class Ads : BasePlugin
                     Interval = 40,
                     Messages = new List<Dictionary<string, string>>
                     {
-                        new()
-                        {
-                            ["Chat"] = "Section 2 Chat 1"
-                        },
-                        new()
-                        {
-                            ["Chat"] = "Section 2 Chat 2",
-                            ["Center"] = "Section 2 Center 1"
-                        }
+                        new() { ["Chat"] = "Section 2 Chat 1" },
+                        new() { ["Chat"] = "Section 2 Chat 2", ["Center"] = "Section 2 Center 1" }
                     }
                 }
             },
-            //Panel = new List<string> { "Panel Advertising 1", "Panel Advertising 2", "Panel Advertising 3" },
             DefaultLang = "US",
-            LanguageMessages = new Dictionary<string, Dictionary<string, string>>()
+            LanguageMessages = new Dictionary<string, Dictionary<string, string>>
             {
                 {
                     "map_name", new Dictionary<string, string>
@@ -387,6 +487,17 @@ public class Ads : BasePlugin
             {
                 ["de_mirage"] = "Mirage",
                 ["de_dust"] = "Dust II"
+            },
+            ConnectAnnounce = "Игрок {PLAYERNAME} зашёл из {COUNTRY}, {CITY}",
+            Servers = new List<ServerInfo>
+            {
+                new ServerInfo
+                {
+                    Ip = "127.0.0.1",
+                    Port = 27015,
+                    Interval = 60,
+                    MessageTemplate = "Сервер {SERVER_NAME} ({SERVER_IP}:{SERVER_PORT}), карта {SERVER_MAP} | {SERVER_PLAYERS}/{SERVER_MAXPLAYERS} игроков"
+                }
             }
         };
 
@@ -394,7 +505,7 @@ public class Ads : BasePlugin
             JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
 
         Console.ForegroundColor = ConsoleColor.DarkGreen;
-        Console.WriteLine("[Advertisement] The configuration was successfully saved to a file: " + configPath);
+        Console.WriteLine("[Advertisement] Created default config at: " + configPath);
         Console.ResetColor();
 
         return config;
@@ -402,47 +513,57 @@ public class Ads : BasePlugin
 
     private string GetPlayerIsoCode(string ip)
     {
-        var defaultLang = string.Empty;
-        if (Config.DefaultLang != null)
-            defaultLang = Config.DefaultLang;
-
+        var defaultLang = Config.DefaultLang ?? "";
         if (ip == "127.0.0.1") return defaultLang;
 
         try
         {
             using var reader = new DatabaseReader(Path.Combine(ModuleDirectory, "GeoLite2-Country.mmdb"));
-
             var response = reader.Country(IPAddress.Parse(ip));
-
             return response.Country.IsoCode ?? defaultLang;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"{ex}");
+            Console.WriteLine($"[Ads] Country lookup error => {ex.Message}");
         }
 
         return defaultLang;
     }
+
+    private string GetPlayerCity(string ip)
+    {
+        if (ip == "127.0.0.1") return "";
+        try
+        {
+            using var reader = new DatabaseReader(Path.Combine(ModuleDirectory, "GeoLite2-City.mmdb"));
+            var response = reader.City(IPAddress.Parse(ip));
+            return response.City?.Name ?? "";
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Ads] City lookup error => {ex.Message}");
+        }
+
+        return "";
+    }
 }
 
+// Конфиг
 public class Config
 {
     public bool? PrintToCenterHtml { get; init; }
     public float? HtmlCenterDuration { get; init; }
     public bool? ShowHtmlWhenDead { get; set; }
     public WelcomeMessage? WelcomeMessage { get; init; }
-    public List<Advertisement> Ads { get; init; }
+    public List<Advertisement>? Ads { get; init; }
     public List<string>? Panel { get; init; }
     public string? DefaultLang { get; init; }
     public Dictionary<string, Dictionary<string, string>>? LanguageMessages { get; init; }
     public Dictionary<string, string>? MapsName { get; init; }
-}
 
-public enum MessageType
-{
-    Chat = 0,
-    Center,
-    CenterHtml
+    // Новые поля
+    public List<ServerInfo>? Servers { get; set; }
+    public string? ConnectAnnounce { get; set; }
 }
 
 public class WelcomeMessage
@@ -458,6 +579,20 @@ public class Advertisement
     public List<Dictionary<string, string>> Messages { get; init; } = null!;
 
     private int _currentMessageIndex;
-
     [JsonIgnore] public Dictionary<string, string> NextMessages => Messages[_currentMessageIndex++ % Messages.Count];
+}
+
+public enum MessageType
+{
+    Chat = 0,
+    Center,
+    CenterHtml
+}
+
+public class ServerInfo
+{
+    public string Ip { get; set; } = "";
+    public int Port { get; set; }
+    public float Interval { get; set; }
+    public string MessageTemplate { get; set; } = "";
 }
