@@ -107,21 +107,9 @@ public class Ads : BasePlugin
 
     private HookResult EventPlayerConnectFull(EventPlayerConnectFull ev, GameEventInfo info)
     {
-        // Если WelcomeMessage отсутствует или пустая, ничего не выводим
-        if (Config.WelcomeMessage == null || string.IsNullOrEmpty(Config.WelcomeMessage.Message))
-            return HookResult.Continue;
-
         var player = ev.Userid;
         if (player is null || !player.IsValid)
             return HookResult.Continue;
-
-        // Приветственное сообщение лично подключившемуся
-        var welcomeMsg = Config.WelcomeMessage;
-        var msg = welcomeMsg.Message
-            .Replace("{PLAYERNAME}", player.PlayerName)
-            .ReplaceColorTags();
-
-        PrintWrappedLine(0, msg, player, true);
 
         // Если ConnectAnnounce не пуст, оповестим всех о стране/городе
         if (!string.IsNullOrEmpty(Config.ConnectAnnounce))
@@ -136,9 +124,21 @@ public class Ads : BasePlugin
                     .ReplaceColorTags();
 
                 // Всем игрокам:
-                Server.PrintToChatAll(connectMsg);
+                PrintWrappedLine(HudDestination.Chat, connectMsg, player);
             }
         }
+
+        // Если WelcomeMessage отсутствует или пустая, ничего не выводим
+        if (Config.WelcomeMessage == null || string.IsNullOrEmpty(Config.WelcomeMessage.Message))
+            return HookResult.Continue;
+
+        // Приветственное сообщение лично подключившемуся
+        var welcomeMsg = Config.WelcomeMessage;
+        var msg = welcomeMsg.Message
+            .Replace("{PLAYERNAME}", player.PlayerName)
+            .ReplaceColorTags();
+
+        PrintWrappedLine(0, msg, player, true);
 
         return HookResult.Continue;
     }
@@ -174,20 +174,27 @@ public class Ads : BasePlugin
     // Опрос серверов по таймеру и их реклама
     private void StartServerTimers()
     {
-        if (Config.Servers == null) return;
+        if (Config.Servers == null || Config.Servers.List.Count == 0) return;
 
-        foreach (var serverInfo in Config.Servers)
+
+        // Каждые serverInfo.Interval секунд делаем опрос
+        _serverTimers.Add(AddTimer(Config.Servers.Interval, () =>
         {
-            // Каждые serverInfo.Interval секунд делаем опрос
-            _serverTimers.Add(AddTimer(serverInfo.Interval, () =>
+            var print = false;
+            foreach (var serverInfo in Config.Servers.List)
             {
                 // Обновляем кеш (QueryServer)
                 var success = QueryServer(serverInfo);
                 // Если успешно, анонсируем всем (AnnounceServersInChat) с титулом (если есть)
                 if (success)
-                    AnnounceServersInChat(isAd: true);
-            }, TimerFlags.REPEAT));
-        }
+                {
+                    print = true;
+                }
+            }
+            
+            if (print)
+                AnnounceServersInChat(isAd: true);
+        }, TimerFlags.REPEAT));
     }
 
     // --- Команды ---
@@ -199,7 +206,7 @@ public class Ads : BasePlugin
     {
         if (controller == null) return;
 
-        if (Config.Servers == null || Config.Servers.Count == 0)
+        if (Config.Servers == null || Config.Servers.List.Count == 0)
             return;
 
         // Печатаем СТРОГО без заголовка, только контент
@@ -251,9 +258,9 @@ public class Ads : BasePlugin
     /// <summary>Единоразовый начальный опрос всех серверов (без анонса).</summary>
     private void InitialServerQuery()
     {
-        if (Config.Servers == null) return;
+        if (Config.Servers == null || Config.Servers.List.Count == 0) return;
 
-        foreach (var serverInfo in Config.Servers)
+        foreach (var serverInfo in Config.Servers.List)
         {
             QueryServer(serverInfo); // просто заполняем кеш, не выводим в чат
         }
@@ -261,7 +268,7 @@ public class Ads : BasePlugin
 
     /// <summary>Опрос одного сервера, заполнение кеша.</summary>
     /// <returns>true, если удалось получить инфу</returns>
-    private bool QueryServer(ServerInfo serverInfo)
+    private bool QueryServer(ServerData serverInfo)
     {
         try
         {
@@ -303,7 +310,7 @@ public class Ads : BasePlugin
         // Если в конфиге прописан заголовок и это реклама — выведем его
         if (isAd && !string.IsNullOrEmpty(Config.TitleAnnounceServers))
         {
-            Server.PrintToChatAll(Config.TitleAnnounceServers!.ReplaceColorTags());
+            PrintWrappedLine(HudDestination.Chat, Config.TitleAnnounceServers!.ReplaceColorTags());
         }
 
         // Теперь выводим строки из кеша
@@ -311,7 +318,7 @@ public class Ads : BasePlugin
         {
             var msg = pair.Value;
             if (!string.IsNullOrEmpty(msg))
-                Server.PrintToChatAll(msg.ReplaceColorTags());
+                PrintWrappedLine(HudDestination.Chat,msg.ReplaceColorTags());
         }
     }
 
@@ -321,7 +328,7 @@ public class Ads : BasePlugin
         // Если реклама и есть заголовок — выводим, иначе пропускаем
         if (isAd && !string.IsNullOrEmpty(Config.TitleAnnounceServers))
         {
-            controller.PrintToChat(Config.TitleAnnounceServers!.ReplaceColorTags());
+            PrintWrappedLine(HudDestination.Chat, Config.TitleAnnounceServers, controller);
         }
 
         // Выводим строки из кеша
@@ -330,7 +337,7 @@ public class Ads : BasePlugin
             var msg = pair.Value;
             if (!string.IsNullOrEmpty(msg))
             {
-                controller.PrintToChat(msg.ReplaceColorTags());
+                PrintWrappedLine(HudDestination.Chat, msg.ReplaceColorTags(), controller);
             }
         }
     }
@@ -367,10 +374,10 @@ public class Ads : BasePlugin
     // --- Вспомогательные методы ---
 
     private void PrintWrappedLine(HudDestination? destination, string message,
-        CCSPlayerController? connectPlayer = null, bool isWelcome = false)
+        CCSPlayerController? connectPlayer = null, bool privateMsg = false)
     {
         // Если это личное приветствие
-        if (connectPlayer != null && !connectPlayer.IsBot && isWelcome)
+        if (connectPlayer != null && !connectPlayer.IsBot && @privateMsg)
         {
             var welcomeMessage = Config.WelcomeMessage;
             if (welcomeMessage == null || string.IsNullOrEmpty(welcomeMessage.Message)) return;
@@ -400,7 +407,7 @@ public class Ads : BasePlugin
         {
             // Обычные сообщения всем игрокам
             foreach (var player in Utilities.GetPlayers()
-                         .Where(u => !isWelcome && !u.IsBot && u.IsValid))
+                         .Where(u => !privateMsg && !u.IsBot && u.IsValid))
             {
                 var processed = ProcessMessage(message, player.SteamID);
                 if (destination == HudDestination.Chat)
@@ -557,14 +564,17 @@ public class Ads : BasePlugin
             },
             ConnectAnnounce = "Игрок {PLAYERNAME} зашёл из {COUNTRY}, {CITY}",
             TitleAnnounceServers = "Список серверов:",
-            Servers = new List<ServerInfo>
+            Servers = new()
             {
-                new ServerInfo
+                Interval = 65,
+                List = new List<ServerData>
                 {
-                    Ip = "127.0.0.1",
-                    Port = 27015,
-                    Interval = 120,
-                    MessageTemplate = "{SERVER_IP}:{SERVER_PORT} - {SERVER_MAP} | {SERVER_PLAYERS}/{SERVER_MAXPLAYERS}"
+                    new()
+                    {
+                        Ip = "127.0.0.1",
+                        Port = 27015,
+                        MessageTemplate = "{SERVER_IP}:{SERVER_PORT} - {SERVER_MAP} | {SERVER_PLAYERS}/{SERVER_MAXPLAYERS}"
+                    }
                 }
             }
         };
@@ -631,7 +641,7 @@ public class Config
 
     // Новые поля
     public string? TitleAnnounceServers { get; set; }
-    public List<ServerInfo>? Servers { get; set; }
+    public ServerInfo? Servers { get; init; }
     public string? ConnectAnnounce { get; set; }
 }
 
@@ -650,8 +660,7 @@ public class Advertisement
     public List<Dictionary<string, string>> Messages { get; init; } = null!;
 
     private int _currentMessageIndex;
-    [JsonIgnore]
-    public Dictionary<string, string> NextMessages => Messages[_currentMessageIndex++ % Messages.Count];
+    [JsonIgnore] public Dictionary<string, string> NextMessages => Messages[_currentMessageIndex++ % Messages.Count];
 }
 
 // Типы сообщений
@@ -665,8 +674,13 @@ public enum MessageType
 // Данные о внешнем сервере
 public class ServerInfo
 {
+    public float Interval { get; set; } // как часто опрашивать
+    public List<ServerData> List { get; set; }
+}
+
+public class ServerData
+{
     public string Ip { get; set; } = "";
     public int Port { get; set; }
-    public float Interval { get; set; }   // как часто опрашивать
     public string MessageTemplate { get; set; } = "";
 }
