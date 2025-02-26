@@ -18,8 +18,6 @@ using CounterStrikeSharp.API.Modules.Entities;
 using CounterStrikeSharp.API.Modules.Timers;
 using CounterStrikeSharp.API.Modules.Utils;
 using MaxMind.GeoIP2;
-using QueryMaster;
-using QueryMaster.GameServer;
 using Server = CounterStrikeSharp.API.Server;
 
 namespace Advertisement;
@@ -192,59 +190,44 @@ public class Ads : BasePlugin
                 TimerFlags.REPEAT));
         }
     }
-    
+
     private void QueryAndAnnounceServer(ServerInfo serverInfo)
     {
         try
         {
-            using (var server = ServerQuery.GetServerInstance(
-                       EngineType.GoldSource, 
-                       serverInfo.Ip, 
-                       (ushort) serverInfo.Port,
-                       false,
-                       2000,
-                       2000,
-                       1))
+            var info = AdvancedA2S.GetServerInfo(serverInfo.Ip, (ushort)serverInfo.Port);
+
+            if (info == null)
             {
-                var info = server.GetInfo();
-                if (info == null)
-                {
-                    Console.WriteLine("GetInfo() вернул null (сервер не ответил или не поддерживает запрос).");
-                    throw new NullReferenceException("info == null");
-                }
-
-                // Выведем в консоль поля info
-                Console.WriteLine("--- GetInfo() data ---");
-                Console.WriteLine($"Server Name: {info.Name}");
-                Console.WriteLine($"Map: {info.Map}");
-                Console.WriteLine($"Players: {info.Players}");
-                Console.WriteLine($"MaxPlayers: {info.MaxPlayers}");
-                Console.WriteLine($"ID: {info.Id}");
-                Console.WriteLine("----------------------");
-                
-                var players = server.GetPlayers();
-
-                // Формируем сообщение по вашему шаблону
-                var msg = serverInfo.MessageTemplate
-                    .Replace("{SERVER_IP}", serverInfo.Ip)
-                    .Replace("{SERVER_PORT}", serverInfo.Port.ToString())
-                    .Replace("{SERVER_NAME}", info.Name)
-                    .Replace("{SERVER_MAP}", info.Map)
-                    .Replace("{SERVER_PLAYERS}", info.Players.ToString())
-                    .Replace("{SERVER_MAXPLAYERS}", info.MaxPlayers.ToString());
-
-                // Сохраняем в кеш (если он у вас есть)
-                _serverStatusCache[(serverInfo.Ip, serverInfo.Port)] = msg;
-
-                // Рассылаем всем в чат
-                foreach (var p in Utilities.GetPlayers().Where(u => !u.IsBot && u.IsValid))
-                    p.PrintToChat(msg);
+                Console.WriteLine("GetInfo() вернул null (сервер не ответил или не поддерживает запрос).");
+                throw new NullReferenceException("info == null");
             }
+
+            // Выведем в консоль поля info
+            Console.WriteLine("--- GetInfo() data ---");
+            Console.WriteLine($"Map: {info.Map}");
+            Console.WriteLine($"Players: {info.Players}");
+            Console.WriteLine($"MaxPlayers: {info.MaxPlayers}");
+            Console.WriteLine("----------------------");
+
+            // Формируем сообщение по вашему шаблону
+            var msg = serverInfo.MessageTemplate
+                .Replace("{SERVER_IP}", serverInfo.Ip)
+                .Replace("{SERVER_PORT}", serverInfo.Port.ToString())
+                .Replace("{SERVER_MAP}", info.Map)
+                .Replace("{SERVER_PLAYERS}", info.Players.ToString())
+                .Replace("{SERVER_MAXPLAYERS}", info.MaxPlayers.ToString());
+
+            // Сохраняем в кеш (если он у вас есть)
+            _serverStatusCache[(serverInfo.Ip, serverInfo.Port)] = msg;
+
+            // Рассылаем всем в чат
+            foreach (var p in Utilities.GetPlayers().Where(u => !u.IsBot && u.IsValid))
+                p.PrintToChat(msg);
         }
         catch (Exception ex)
-        {
-            var errMsg = $"[{serverInfo.Ip}:{serverInfo.Port}] Error: {ex.Message}";
-            _serverStatusCache[(serverInfo.Ip, serverInfo.Port)] = errMsg;
+        { ;
+            _serverStatusCache.Remove((serverInfo.Ip, serverInfo.Port));
             Console.WriteLine($"[Ads] Ошибка опроса {serverInfo.Ip}:{serverInfo.Port} => {ex.Message}");
         }
     }
@@ -265,6 +248,8 @@ public class Ads : BasePlugin
             if (_serverStatusCache.TryGetValue((server.Ip, server.Port), out var cachedMsg))
             {
                 controller.PrintToChat(cachedMsg);
+                controller.ExecuteClientCommand("connect " + server.Ip + ":" + server.Port);
+                return;
             }
         }
     }
@@ -496,7 +481,7 @@ public class Ads : BasePlugin
                     Ip = "127.0.0.1",
                     Port = 27015,
                     Interval = 60,
-                    MessageTemplate = "Сервер {SERVER_NAME} ({SERVER_IP}:{SERVER_PORT}), карта {SERVER_MAP} | {SERVER_PLAYERS}/{SERVER_MAXPLAYERS} игроков"
+                    MessageTemplate = "{SERVER_IP}:{SERVER_PORT} - {SERVER_MAP} | {SERVER_PLAYERS}/{SERVER_MAXPLAYERS}"
                 }
             }
         };

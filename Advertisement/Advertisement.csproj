@@ -11,6 +11,5 @@
   <ItemGroup>
     <PackageReference Include="CounterStrikeSharp.API" Version="*" />
     <PackageReference Include="MaxMind.GeoIP2" Version="5.2.0" />
-    <PackageReference Include="QueryMaster" Version="1.1.2" />
   </ItemGroup>
 </Project>
