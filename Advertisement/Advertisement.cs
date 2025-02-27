@@ -117,6 +117,9 @@ public class Ads : BasePlugin
             if (_playerIsoCode.TryGetValue(player.SteamID, out var country) &&
                 _playerCity.TryGetValue(player.SteamID, out var city))
             {
+                
+                city = string.IsNullOrEmpty(city) ? "Unknown" : city; // Если город не найден, заменить на "Unknown"
+
                 var connectMsg = Config.ConnectAnnounce
                     .Replace("{PLAYERNAME}", player.PlayerName)
                     .Replace("{COUNTRY}", country)
@@ -337,7 +340,7 @@ public class Ads : BasePlugin
             var msg = pair.Value;
             if (!string.IsNullOrEmpty(msg))
             {
-                PrintWrappedLine(HudDestination.Chat, msg.ReplaceColorTags(), controller);
+                PrintWrappedLine(HudDestination.Chat, msg.ReplaceColorTags(), controller, true);
             }
         }
     }
