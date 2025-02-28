@@ -117,7 +117,6 @@ public class Ads : BasePlugin
             if (_playerIsoCode.TryGetValue(player.SteamID, out var country) &&
                 _playerCity.TryGetValue(player.SteamID, out var city))
             {
-                
                 city = string.IsNullOrEmpty(city) ? "Unknown" : city; // Если город не найден, заменить на "Unknown"
 
                 var connectMsg = Config.ConnectAnnounce
@@ -141,7 +140,7 @@ public class Ads : BasePlugin
             .Replace("{PLAYERNAME}", player.PlayerName)
             .ReplaceColorTags();
 
-        PrintWrappedLine(0, msg, player, true);
+        AddTimer(Config.WelcomeMessage.DisplayDelay, () => { PrintWrappedLine(0, msg, player, true); });
 
         return HookResult.Continue;
     }
@@ -194,7 +193,7 @@ public class Ads : BasePlugin
                     print = true;
                 }
             }
-            
+
             if (print)
                 AnnounceServersInChat(isAd: true);
         }, TimerFlags.REPEAT));
@@ -321,7 +320,7 @@ public class Ads : BasePlugin
         {
             var msg = pair.Value;
             if (!string.IsNullOrEmpty(msg))
-                PrintWrappedLine(HudDestination.Chat,msg.ReplaceColorTags());
+                PrintWrappedLine(HudDestination.Chat, msg.ReplaceColorTags());
         }
     }
 
@@ -385,26 +384,24 @@ public class Ads : BasePlugin
             var welcomeMessage = Config.WelcomeMessage;
             if (welcomeMessage == null || string.IsNullOrEmpty(welcomeMessage.Message)) return;
 
-            AddTimer(welcomeMessage.DisplayDelay, () =>
+
+            if (connectPlayer == null || !connectPlayer.IsValid) return;
+
+            var processed = ProcessMessage(message, connectPlayer.SteamID)
+                .Replace("{PLAYERNAME}", connectPlayer.PlayerName);
+
+            switch (welcomeMessage.MessageType)
             {
-                if (connectPlayer == null || !connectPlayer.IsValid) return;
-
-                var processed = ProcessMessage(message, connectPlayer.SteamID)
-                    .Replace("{PLAYERNAME}", connectPlayer.PlayerName);
-
-                switch (welcomeMessage.MessageType)
-                {
-                    case MessageType.Chat:
-                        connectPlayer.PrintToChat(processed);
-                        break;
-                    case MessageType.Center:
-                        connectPlayer.PrintToChat(processed);
-                        break;
-                    case MessageType.CenterHtml:
-                        SetHtmlPrintSettings(connectPlayer, processed);
-                        break;
-                }
-            });
+                case MessageType.Chat:
+                    connectPlayer.PrintToChat(processed);
+                    break;
+                case MessageType.Center:
+                    connectPlayer.PrintToChat(processed);
+                    break;
+                case MessageType.CenterHtml:
+                    SetHtmlPrintSettings(connectPlayer, processed);
+                    break;
+            }
         }
         else
         {
