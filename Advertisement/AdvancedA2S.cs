@@ -13,6 +13,7 @@ public class A2SInfoResponse
     public string Map { get; set; } = "";
     public byte Players { get; set; }
     public byte MaxPlayers { get; set; }
+    public byte Bots { get; set; }
     public string GameDir { get; set; } = "";
     public string GameDesc { get; set; } = "";
     public byte Protocol { get; set; }
@@ -79,7 +80,8 @@ public static class AdvancedA2S
             response.Players = raw[index++];
             // Макс. кол-во игроков
             response.MaxPlayers = raw[index++];
-            // Кол-во ботов (пропускаем, если не нужно)
+            // Кол-во ботов
+            response.Bots = raw[index++];
             index++;
 
             // Далее ещё куча полей — при необходимости допарсить

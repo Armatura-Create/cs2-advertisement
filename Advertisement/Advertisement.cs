@@ -287,10 +287,11 @@ public class Ads : BasePlugin
                 .Replace("{SERVER_IP}", serverInfo.Ip)
                 .Replace("{SERVER_PORT}", serverInfo.Port.ToString())
                 .Replace("{SERVER_MAP}", info.Map)
-                .Replace("{SERVER_PLAYERS}", info.Players.ToString())
-                .Replace("{SERVER_MAXPLAYERS}", info.MaxPlayers.ToString()).ReplaceColorTags();
+                .Replace("{SERVER_PLAYERS}", (info.Players - info.Bots < 0 ? 0 : info.Players - info.Bots).ToString())
+                .Replace("{SERVER_MAXPLAYERS}", info.MaxPlayers.ToString())
+                .ReplaceColorTags();
 
-            _serverStatusCache[(serverInfo.Ip, serverInfo.Port)] = msg;
+            _serverStatusCache[(serverInfo.Ip, serverInfo.Port)] = ProcessMessage(msg, 0);
             return true;
         }
         catch (Exception ex)
@@ -320,7 +321,7 @@ public class Ads : BasePlugin
         {
             var msg = pair.Value;
             if (!string.IsNullOrEmpty(msg))
-                PrintWrappedLine(HudDestination.Chat, msg.ReplaceColorTags());
+                PrintWrappedLine(HudDestination.Chat, msg);
         }
     }
 
@@ -339,7 +340,7 @@ public class Ads : BasePlugin
             var msg = pair.Value;
             if (!string.IsNullOrEmpty(msg))
             {
-                PrintWrappedLine(HudDestination.Chat, msg.ReplaceColorTags(), controller, true);
+                PrintWrappedLine(HudDestination.Chat, msg, controller, true);
             }
         }
     }
@@ -379,13 +380,13 @@ public class Ads : BasePlugin
         CCSPlayerController? connectPlayer = null, bool privateMsg = false)
     {
         // Если это личное приветствие
-        if (connectPlayer != null && !connectPlayer.IsBot && @privateMsg)
+        if (connectPlayer != null && connectPlayer is { IsValid: true, IsBot: false } && privateMsg)
         {
             var welcomeMessage = Config.WelcomeMessage;
             if (welcomeMessage == null || string.IsNullOrEmpty(welcomeMessage.Message)) return;
 
 
-            if (connectPlayer == null || !connectPlayer.IsValid) return;
+            if (!connectPlayer.IsValid) return;
 
             var processed = ProcessMessage(message, connectPlayer.SteamID)
                 .Replace("{PLAYERNAME}", connectPlayer.PlayerName);
@@ -393,7 +394,6 @@ public class Ads : BasePlugin
             switch (welcomeMessage.MessageType)
             {
                 case MessageType.Chat:
-                    connectPlayer.PrintToChat(processed);
                     break;
                 case MessageType.Center:
                     connectPlayer.PrintToChat(processed);
@@ -422,6 +422,13 @@ public class Ads : BasePlugin
                         player.PrintToCenter(processed);
                 }
             }
+        }
+
+        if (!Config.Debug) return;
+        {
+            var processed = ProcessMessage(message, 0)
+                .Replace("{PLAYERNAME}", connectPlayer.PlayerName);
+            Console.WriteLine("[ADS DEBUG] " + Regex.Replace(processed, "[\x01-\x10]", ""));
         }
     }
 
@@ -509,6 +516,7 @@ public class Ads : BasePlugin
     {
         var config = new Config
         {
+            Debug = false,
             PrintToCenterHtml = false,
             WelcomeMessage = new WelcomeMessage
             {
@@ -632,6 +640,7 @@ public class Config
     public bool? PrintToCenterHtml { get; init; }
     public float? HtmlCenterDuration { get; init; }
     public bool? ShowHtmlWhenDead { get; set; }
+    public bool Debug { get; set; } = false;
     public WelcomeMessage? WelcomeMessage { get; init; }
     public List<Advertisement>? Ads { get; init; }
     public List<string>? Panel { get; init; }
