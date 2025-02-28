@@ -384,10 +384,7 @@ public class Ads : BasePlugin
         {
             var welcomeMessage = Config.WelcomeMessage;
             if (welcomeMessage == null || string.IsNullOrEmpty(welcomeMessage.Message)) return;
-
-
-            if (!connectPlayer.IsValid) return;
-
+            
             var processed = ProcessMessage(message, connectPlayer.SteamID)
                 .Replace("{PLAYERNAME}", connectPlayer.PlayerName);
 
@@ -426,8 +423,7 @@ public class Ads : BasePlugin
 
         if (!Config.Debug) return;
         {
-            var processed = ProcessMessage(message, 0)
-                .Replace("{PLAYERNAME}", connectPlayer.PlayerName);
+            var processed = ProcessMessage(message, 0);
             Console.WriteLine("[ADS DEBUG] " + Regex.Replace(processed, "[\x01-\x10]", ""));
         }
     }
@@ -462,7 +458,7 @@ public class Ads : BasePlugin
             if (!Config.LanguageMessages.TryGetValue(tagName, out var language))
                 continue;
 
-            var isoCode = _playerIsoCode.TryGetValue(steamId, out var code)
+            var isoCode =steamId > 0 && _playerIsoCode.TryGetValue(steamId, out var code)
                 ? code
                 : Config.DefaultLang;
 
