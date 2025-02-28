@@ -122,8 +122,7 @@ public class Ads : BasePlugin
                 var connectMsg = Config.ConnectAnnounce
                     .Replace("{PLAYERNAME}", player.PlayerName)
                     .Replace("{COUNTRY}", country)
-                    .Replace("{CITY}", city)
-                    .ReplaceColorTags();
+                    .Replace("{CITY}", city);
 
                 // Всем игрокам:
                 PrintWrappedLine(HudDestination.Chat, connectMsg, player);
@@ -137,8 +136,7 @@ public class Ads : BasePlugin
         // Приветственное сообщение лично подключившемуся
         var welcomeMsg = Config.WelcomeMessage;
         var msg = welcomeMsg.Message
-            .Replace("{PLAYERNAME}", player.PlayerName)
-            .ReplaceColorTags();
+            .Replace("{PLAYERNAME}", player.PlayerName);
 
         AddTimer(Config.WelcomeMessage.DisplayDelay, () => { PrintWrappedLine(0, msg, player, true); });
 
@@ -286,10 +284,9 @@ public class Ads : BasePlugin
             var msg = serverInfo.MessageTemplate
                 .Replace("{SERVER_IP}", serverInfo.Ip)
                 .Replace("{SERVER_PORT}", serverInfo.Port.ToString())
-                .Replace("{SERVER_MAP}", info.Map)
+                .Replace("{SERVER_MAP}", info.Map.Trim())
                 .Replace("{SERVER_PLAYERS}", (info.Players - info.Bots < 0 ? 0 : info.Players - info.Bots).ToString())
-                .Replace("{SERVER_MAXPLAYERS}", info.MaxPlayers.ToString())
-                .ReplaceColorTags();
+                .Replace("{SERVER_MAXPLAYERS}", info.MaxPlayers.ToString());
 
             _serverStatusCache[(serverInfo.Ip, serverInfo.Port)] = ProcessMessage(msg, 0);
             return true;
@@ -313,7 +310,7 @@ public class Ads : BasePlugin
         // Если в конфиге прописан заголовок и это реклама — выведем его
         if (isAd && !string.IsNullOrEmpty(Config.TitleAnnounceServers))
         {
-            PrintWrappedLine(HudDestination.Chat, Config.TitleAnnounceServers!.ReplaceColorTags());
+            PrintWrappedLine(HudDestination.Chat, Config.TitleAnnounceServers!);
         }
 
         // Теперь выводим строки из кеша
@@ -384,13 +381,14 @@ public class Ads : BasePlugin
         {
             var welcomeMessage = Config.WelcomeMessage;
             if (welcomeMessage == null || string.IsNullOrEmpty(welcomeMessage.Message)) return;
-            
+
             var processed = ProcessMessage(message, connectPlayer.SteamID)
                 .Replace("{PLAYERNAME}", connectPlayer.PlayerName);
 
             switch (welcomeMessage.MessageType)
             {
                 case MessageType.Chat:
+                    connectPlayer.PrintToChat(processed);
                     break;
                 case MessageType.Center:
                     connectPlayer.PrintToChat(processed);
@@ -458,7 +456,7 @@ public class Ads : BasePlugin
             if (!Config.LanguageMessages.TryGetValue(tagName, out var language))
                 continue;
 
-            var isoCode =steamId > 0 && _playerIsoCode.TryGetValue(steamId, out var code)
+            var isoCode = steamId > 0 && _playerIsoCode.TryGetValue(steamId, out var code)
                 ? code
                 : Config.DefaultLang;
 
@@ -475,6 +473,8 @@ public class Ads : BasePlugin
     private string ReplaceMessageTags(string message)
     {
         var mapName = NativeAPI.GetMapName();
+    
+        // Основные замены
         var replacedMessage = message
             .Replace("{MAP}", mapName)
             .Replace("{TIME}", DateTime.Now.ToString("HH:mm:ss"))
@@ -484,13 +484,18 @@ public class Ads : BasePlugin
             .Replace("{PORT}", ConVar.Find("hostport")?.GetPrimitiveValue<int>().ToString() ?? "27015")
             .Replace("{MAXPLAYERS}", Server.MaxPlayers.ToString())
             .Replace("{PLAYERS}", Utilities.GetPlayers().Count(u => u.PlayerPawn?.Value?.IsValid == true).ToString())
-            .Replace("\n", "\u2029")
-            .ReplaceColorTags();
+            .Replace("\n", "\u2029");
 
-        if (Config.MapsName != null && Config.MapsName.TryGetValue(mapName, out var niceName))
-            replacedMessage = replacedMessage.Replace(mapName, niceName);
+        // Проверяем {SERVER_MAP}, чтобы тоже подставлять кастомные названия карт
+        if (Config.MapsName != null)
+        {
+            foreach (var (key, niceName) in Config.MapsName)
+            {
+                replacedMessage = Regex.Replace(replacedMessage, $@"\b{Regex.Escape(key)}\b", niceName);
+            }
+        }
 
-        return replacedMessage;
+        return replacedMessage.ReplaceColorTags();
     }
 
     private Config LoadConfig()
