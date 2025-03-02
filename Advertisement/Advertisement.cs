@@ -210,6 +210,9 @@ public class Ads : BasePlugin
                 case "Center":
                     PrintWrappedLine(HudDestination.Center, message);
                     break;
+                case "Console":
+                    PrintWrappedLine(HudDestination.Console, message);
+                    break;
             }
         }
     }
@@ -253,7 +256,7 @@ public class Ads : BasePlugin
             return;
 
         // Печатаем СТРОГО без заголовка, только контент
-        AnnounceServersToPlayer(controller, isAd: false);
+        AnnounceServersToPlayer(controller);
     }
 
     // Команда перезагрузки конфига
@@ -368,7 +371,7 @@ public class Ads : BasePlugin
     }
 
     /// <summary>Анонсируем ОДНОМУ игроку (без заголовка, если isAd=false) список серверов из кеша.</summary>
-    private void AnnounceServersToPlayer(CCSPlayerController controller, bool isAd)
+    private void AnnounceServersToPlayer(CCSPlayerController controller)
     {
         // Если реклама и есть заголовок — выводим, иначе пропускаем
         if (!string.IsNullOrEmpty(Config.TitleAnnounceServers))
@@ -438,6 +441,9 @@ public class Ads : BasePlugin
                 case MessageType.Center:
                     connectPlayer.PrintToChat(processed);
                     break;
+                case MessageType.Console:
+                    connectPlayer.PrintToConsole(processed);
+                    break;
                 case MessageType.CenterHtml:
                     SetHtmlPrintSettings(connectPlayer, processed);
                     break;
@@ -450,16 +456,21 @@ public class Ads : BasePlugin
                          .Where(u => !privateMsg && !u.IsBot && u.IsValid))
             {
                 var processed = ProcessMessage(message, player.SteamID);
-                if (destination == HudDestination.Chat)
+
+                switch (destination)
                 {
-                    player.PrintToChat(processed);
-                }
-                else
-                {
-                    if (Config.PrintToCenterHtml == true)
-                        SetHtmlPrintSettings(player, processed);
-                    else
-                        player.PrintToCenter(processed);
+                    case HudDestination.Chat:
+                        player.PrintToChat(processed);
+                        break;
+                    case HudDestination.Console:
+                        player.PrintToConsole(processed);
+                        break;
+                    default:
+                        if (Config.PrintToCenterHtml == true)
+                            SetHtmlPrintSettings(player, processed);
+                        else
+                            player.PrintToCenter(processed);
+                        break;
                 }
             }
         }
@@ -532,12 +543,11 @@ public class Ads : BasePlugin
             .Replace("\n", "\u2029");
 
         // Проверяем {SERVER_MAP}, чтобы тоже подставлять кастомные названия карт
-        if (Config.MapsName != null)
+        if (Config.MapsName == null) return replacedMessage.ReplaceColorTags();
+        
+        foreach (var (key, niceName) in Config.MapsName)
         {
-            foreach (var (key, niceName) in Config.MapsName)
-            {
-                replacedMessage = Regex.Replace(replacedMessage, $@"\b{Regex.Escape(key)}\b", niceName);
-            }
+            replacedMessage = Regex.Replace(replacedMessage, $@"\b{Regex.Escape(key)}\b", niceName);
         }
 
         return replacedMessage.ReplaceColorTags();
@@ -630,7 +640,8 @@ public class Ads : BasePlugin
                         Ip = "127.0.0.1",
                         Port = 27015,
                         MessageTemplate =
-                            "{SERVER_IP}:{SERVER_PORT} - {SERVER_MAP} | {SERVER_PLAYERS}/{SERVER_MAXPLAYERS}"
+                            "{SERVER_IP}:{SERVER_PORT} - {SERVER_MAP} | {SERVER_PLAYERS}/{SERVER_MAXPLAYERS}",
+                        MessageTemplateConsole = "{SERVER_IP}:{SERVER_PORT} - {SERVER_MAP} | {SERVER_PLAYERS}/{SERVER_MAXPLAYERS}"
                     }
                 ]
             }
@@ -727,7 +738,8 @@ public enum MessageType
 {
     Chat = 0,
     Center,
-    CenterHtml
+    CenterHtml,
+    Console
 }
 
 // Данные о внешнем сервере
@@ -742,4 +754,5 @@ public class ServerData
     public string Ip { get; set; } = "";
     public int Port { get; set; }
     public string MessageTemplate { get; set; } = "";
+    public string MessageTemplateConsole { get; set; } = "";
 }
