@@ -47,6 +47,7 @@ public class Ads : BasePlugin
     // Кеш для результатов опросов серверов
     // Ключ – (ip, port), значение – последний сформированный текст (или пусто, если ошибка)
     private readonly Dictionary<(string, int), string> _serverStatusCache = new();
+    private readonly Dictionary<(string, int), string> _serverStatusCacheTemplate = new();
 
     // Пользовательские данные по слотам
     private readonly User?[] _users = new User?[66];
@@ -180,8 +181,10 @@ public class Ads : BasePlugin
         var welcomeMsg = Config.WelcomeMessage;
         var msg = welcomeMsg.Message
             .Replace("{PLAYERNAME}", player.PlayerName);
+        
+        HudDestination type = Config.WelcomeMessage.MessageType == 0 ? HudDestination.Chat : HudDestination.Center;
 
-        AddTimer(Config.WelcomeMessage.DisplayDelay, () => { PrintWrappedLine(0, msg, player, true); });
+        AddTimer(Config.WelcomeMessage.DisplayDelay, () => { PrintWrappedLine(type, msg, player, true); });
 
         return HookResult.Continue;
     }
@@ -239,7 +242,7 @@ public class Ads : BasePlugin
             }
 
             if (print)
-                AnnounceServersInChat(isAd: true);
+                AnnounceServersInChat();
         }, TimerFlags.REPEAT));
     }
 
@@ -273,6 +276,7 @@ public class Ads : BasePlugin
         _serverTimers.Clear();
 
         _serverStatusCache.Clear(); // очистим кеш при перезагрузке
+        _serverStatusCacheTemplate.Clear(); // очистим кеш при перезагрузке
         
         InitialServerQuery();
 
@@ -325,6 +329,7 @@ public class Ads : BasePlugin
             {
                 Console.WriteLine($"[Ads] {serverInfo.Ip}:{serverInfo.Port} -> info == null");
                 _serverStatusCache.Remove((serverInfo.Ip, serverInfo.Port));
+                _serverStatusCacheTemplate.Remove((serverInfo.Ip, serverInfo.Port));
                 return false;
             }
 
@@ -335,14 +340,22 @@ public class Ads : BasePlugin
                 .Replace("{SERVER_MAP}", info.Map.Trim())
                 .Replace("{SERVER_PLAYERS}", (info.Players - info.Bots < 0 ? 0 : info.Players - info.Bots).ToString())
                 .Replace("{SERVER_MAXPLAYERS}", info.MaxPlayers.ToString());
+            var msgConsole = serverInfo.MessageTemplateConsole
+                .Replace("{SERVER_IP}", serverInfo.Ip)
+                .Replace("{SERVER_PORT}", serverInfo.Port.ToString())
+                .Replace("{SERVER_MAP}", info.Map.Trim())
+                .Replace("{SERVER_PLAYERS}", (info.Players - info.Bots < 0 ? 0 : info.Players - info.Bots).ToString())
+                .Replace("{SERVER_MAXPLAYERS}", info.MaxPlayers.ToString());
 
             _serverStatusCache[(serverInfo.Ip, serverInfo.Port)] = ProcessMessage(msg, 0);
+            _serverStatusCacheTemplate[(serverInfo.Ip, serverInfo.Port)] = ProcessMessage(msgConsole, 0);
             return true;
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[Ads] Ошибка опроса {serverInfo.Ip}:{serverInfo.Port} => {ex.Message}");
             _serverStatusCache.Remove((serverInfo.Ip, serverInfo.Port));
+            _serverStatusCacheTemplate.Remove((serverInfo.Ip, serverInfo.Port));
             return false;
         }
     }
@@ -350,13 +363,13 @@ public class Ads : BasePlugin
     // --- Вывод списка серверов ---
 
     /// <summary>Анонсируем ВСЕМ игрокам (либо с заголовком, если isAd=true) список серверов из кеша.</summary>
-    private void AnnounceServersInChat(bool isAd)
+    private void AnnounceServersInChat()
     {
         var players = Utilities.GetPlayers().Where(u => !u.IsBot && u.IsValid);
         if (!players.Any()) return; // никто не увидит
 
         // Если в конфиге прописан заголовок и это реклама — выведем его
-        if (isAd && !string.IsNullOrEmpty(Config.TitleAnnounceServers))
+        if (!string.IsNullOrEmpty(Config.TitleAnnounceServers))
         {
             PrintWrappedLine(HudDestination.Chat, Config.TitleAnnounceServers!);
         }
@@ -367,6 +380,13 @@ public class Ads : BasePlugin
             var msg = pair.Value;
             if (!string.IsNullOrEmpty(msg))
                 PrintWrappedLine(HudDestination.Chat, msg);
+        }
+        
+        foreach (var pair in _serverStatusCacheTemplate)
+        {
+            var msg = pair.Value;
+            if (!string.IsNullOrEmpty(msg))
+                PrintWrappedLine(HudDestination.Console, msg);
         }
     }
 
@@ -386,6 +406,15 @@ public class Ads : BasePlugin
             if (!string.IsNullOrEmpty(msg))
             {
                 PrintWrappedLine(HudDestination.Chat, msg, controller, true);
+            }
+        }
+        
+        foreach (var pair in _serverStatusCacheTemplate)
+        {
+            var msg = pair.Value;
+            if (!string.IsNullOrEmpty(msg))
+            {
+                PrintWrappedLine(HudDestination.Console, msg, controller, true);
             }
         }
     }
@@ -427,25 +456,21 @@ public class Ads : BasePlugin
         // Если это личное приветствие
         if (connectPlayer != null && connectPlayer is { IsValid: true, IsBot: false } && privateMsg)
         {
-            var welcomeMessage = Config.WelcomeMessage;
-            if (welcomeMessage == null || string.IsNullOrEmpty(welcomeMessage.Message)) return;
+            var processed = ProcessMessage(message, connectPlayer.SteamID);
 
-            var processed = ProcessMessage(message, connectPlayer.SteamID)
-                .Replace("{PLAYERNAME}", connectPlayer.PlayerName);
-
-            switch (welcomeMessage.MessageType)
+            switch (destination)
             {
-                case MessageType.Chat:
+                case HudDestination.Chat:
                     connectPlayer.PrintToChat(processed);
                     break;
-                case MessageType.Center:
-                    connectPlayer.PrintToChat(processed);
-                    break;
-                case MessageType.Console:
+                case HudDestination.Console:
                     connectPlayer.PrintToConsole(processed);
                     break;
-                case MessageType.CenterHtml:
-                    SetHtmlPrintSettings(connectPlayer, processed);
+                default:
+                    if (Config.PrintToCenterHtml == true)
+                        SetHtmlPrintSettings(connectPlayer, processed);
+                    else
+                        connectPlayer.PrintToCenter(processed);
                     break;
             }
         }
