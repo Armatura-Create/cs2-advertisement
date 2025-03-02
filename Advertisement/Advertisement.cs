@@ -60,6 +60,7 @@ public class Ads : BasePlugin
 
         // Регистрируем различные события
         RegisterEventHandler<EventPlayerConnectFull>(EventPlayerConnectFull);
+        RegisterEventHandler<EventPlayerDisconnect>(EventPlayerDisconnectPre, HookMode.Pre);
         RegisterEventHandler<EventPlayerDisconnect>(EventPlayerDisconnect);
 
         RegisterListener<Listeners.OnClientAuthorized>(OnClientAuthorized);
@@ -73,11 +74,10 @@ public class Ads : BasePlugin
         StartTimers();
         StartServerTimers();
 
-        if (hotReload)
-        {
-            foreach (var player in Utilities.GetPlayers())
-                _users[player.Slot] = new User();
-        }
+        if (!hotReload) return;
+        
+        foreach (var player in Utilities.GetPlayers())
+            _users[player.Slot] = new User();
     }
 
     // --- События игрока ---
@@ -89,13 +89,40 @@ public class Ads : BasePlugin
 
         if (!string.IsNullOrEmpty(Config.DisconnectMessage))
         {
-            var msg = Config.DisconnectMessage
-                .Replace("{PLAYERNAME}", player.PlayerName);
-            PrintWrappedLine(HudDestination.Chat, msg);
+            if (_playerIsoCode.TryGetValue(player.SteamID, out var country) &&
+                _playerCity.TryGetValue(player.SteamID, out var city))
+            {
+                city = string.IsNullOrEmpty(city) ? "Unknown" : city; // Если город не найден, заменить на "Unknown"
+
+                var connectMsg = Config.DisconnectMessage
+                    .Replace("{PLAYERNAME}", player.PlayerName)
+                    .Replace("{COUNTRY}", country)
+                    .Replace("{CITY}", city);
+
+                // Всем игрокам:
+                PrintWrappedLine(HudDestination.Chat, connectMsg);
+            }
+            else
+            {
+                var connectMsg = Config.DisconnectMessage
+                    .Replace("{PLAYERNAME}", player.PlayerName)
+                    .Replace("{COUNTRY}", "")
+                    .Replace("{CITY}", "");
+                
+                // Всем игрокам:
+                PrintWrappedLine(HudDestination.Chat, connectMsg);
+            }
         }
 
         _playerIsoCode.Remove(player.SteamID);
         _playerCity.Remove(player.SteamID);
+
+        return HookResult.Continue;
+    }
+    
+    private HookResult EventPlayerDisconnectPre(EventPlayerDisconnect ev, GameEventInfo info)
+    {
+        info.DontBroadcast = true;
 
         return HookResult.Continue;
     }
@@ -131,6 +158,16 @@ public class Ads : BasePlugin
                     .Replace("{COUNTRY}", country)
                     .Replace("{CITY}", city);
 
+                // Всем игрокам:
+                PrintWrappedLine(HudDestination.Chat, connectMsg);
+            }
+            else
+            {
+                var connectMsg = Config.ConnectAnnounce
+                    .Replace("{PLAYERNAME}", player.PlayerName)
+                    .Replace("{COUNTRY}", "")
+                    .Replace("{CITY}", "");
+                
                 // Всем игрокам:
                 PrintWrappedLine(HudDestination.Chat, connectMsg);
             }
