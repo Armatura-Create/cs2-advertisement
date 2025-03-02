@@ -35,10 +35,10 @@ public class Ads : BasePlugin
 {
     public override string ModuleAuthor => "thesamefabius & Armatura";
     public override string ModuleName => "Advertisement";
-    public override string ModuleVersion => "v1.2.0";
+    public override string ModuleVersion => "v1.2.1";
 
-    private readonly List<Timer> _timers = new();
-    private readonly List<Timer> _serverTimers = new();
+    private readonly List<Timer> _timers = [];
+    private readonly List<Timer> _serverTimers = [];
 
     // Для определения страны/города
     private readonly Dictionary<ulong, string> _playerIsoCode = new();
@@ -87,6 +87,13 @@ public class Ads : BasePlugin
         var player = ev.Userid;
         if (player is null) return HookResult.Continue;
 
+        if (!string.IsNullOrEmpty(Config.DisconnectMessage))
+        {
+            var msg = Config.DisconnectMessage
+                .Replace("{PLAYERNAME}", player.PlayerName);
+            PrintWrappedLine(HudDestination.Chat, msg);
+        }
+
         _playerIsoCode.Remove(player.SteamID);
         _playerCity.Remove(player.SteamID);
 
@@ -125,7 +132,7 @@ public class Ads : BasePlugin
                     .Replace("{CITY}", city);
 
                 // Всем игрокам:
-                PrintWrappedLine(HudDestination.Chat, connectMsg, player);
+                PrintWrappedLine(HudDestination.Chat, connectMsg);
             }
         }
 
@@ -326,9 +333,9 @@ public class Ads : BasePlugin
     private void AnnounceServersToPlayer(CCSPlayerController controller, bool isAd)
     {
         // Если реклама и есть заголовок — выводим, иначе пропускаем
-        if (isAd && !string.IsNullOrEmpty(Config.TitleAnnounceServers))
+        if (!string.IsNullOrEmpty(Config.TitleAnnounceServers))
         {
-            PrintWrappedLine(HudDestination.Chat, Config.TitleAnnounceServers, controller);
+            PrintWrappedLine(HudDestination.Chat, Config.TitleAnnounceServers, controller, true);
         }
 
         // Выводим строки из кеша
@@ -525,9 +532,10 @@ public class Ads : BasePlugin
                 Message = "Welcome, {BLUE}{PLAYERNAME}",
                 DisplayDelay = 5
             },
-            Ads = new List<Advertisement>
-            {
-                new()
+            DisconnectMessage = "Goodbye, {PLAYERNAME}",
+            Ads =
+            [
+                new Advertisement
                 {
                     Interval = 35,
                     Messages = new List<Dictionary<string, string>>
@@ -536,7 +544,8 @@ public class Ads : BasePlugin
                         new() { ["Chat"] = "{current_time}" }
                     }
                 },
-                new()
+
+                new Advertisement
                 {
                     Interval = 40,
                     Messages = new List<Dictionary<string, string>>
@@ -545,7 +554,7 @@ public class Ads : BasePlugin
                         new() { ["Chat"] = "Section 2 Chat 2", ["Center"] = "Section 2 Center 1" }
                     }
                 }
-            },
+            ],
             DefaultLang = "US",
             LanguageMessages = new Dictionary<string, Dictionary<string, string>>
             {
@@ -573,18 +582,19 @@ public class Ads : BasePlugin
             },
             ConnectAnnounce = "Игрок {PLAYERNAME} зашёл из {COUNTRY}, {CITY}",
             TitleAnnounceServers = "Список серверов:",
-            Servers = new()
+            Servers = new ServerInfo
             {
                 Interval = 65,
-                List = new List<ServerData>
-                {
-                    new()
+                List =
+                [
+                    new ServerData
                     {
                         Ip = "127.0.0.1",
                         Port = 27015,
-                        MessageTemplate = "{SERVER_IP}:{SERVER_PORT} - {SERVER_MAP} | {SERVER_PLAYERS}/{SERVER_MAXPLAYERS}"
+                        MessageTemplate =
+                            "{SERVER_IP}:{SERVER_PORT} - {SERVER_MAP} | {SERVER_PLAYERS}/{SERVER_MAXPLAYERS}"
                     }
-                }
+                ]
             }
         };
 
@@ -643,6 +653,7 @@ public class Config
     public bool? ShowHtmlWhenDead { get; set; }
     public bool Debug { get; set; } = false;
     public WelcomeMessage? WelcomeMessage { get; init; }
+    public string? DisconnectMessage { get; init; }
     public List<Advertisement>? Ads { get; init; }
     public List<string>? Panel { get; init; }
     public string? DefaultLang { get; init; }
