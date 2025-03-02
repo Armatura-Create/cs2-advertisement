@@ -123,7 +123,6 @@ public class Ads : BasePlugin
     private HookResult EventPlayerDisconnectPre(EventPlayerDisconnect ev, GameEventInfo info)
     {
         info.DontBroadcast = true;
-
         return HookResult.Continue;
     }
 
@@ -271,16 +270,18 @@ public class Ads : BasePlugin
         _serverTimers.Clear();
 
         _serverStatusCache.Clear(); // очистим кеш при перезагрузке
+        
+        InitialServerQuery();
 
         // Повторно подгрузим язык/город для текущих игроков
         foreach (var player in Utilities.GetPlayers())
         {
-            if (player.IpAddress == null || player.AuthorizedSteamID == null)
+            if (player.IpAddress == null || player.IsBot || !player.IsValid)
                 continue;
 
             var ip = player.IpAddress.Split(':')[0];
-            _playerIsoCode[player.AuthorizedSteamID.SteamId64] = GetPlayerIsoCode(ip);
-            _playerCity[player.AuthorizedSteamID.SteamId64] = GetPlayerCity(ip);
+            _playerIsoCode[player.SteamID] = GetPlayerIsoCode(ip);
+            _playerCity[player.SteamID] = GetPlayerCity(ip);
         }
 
         // После Reload заново делаем начальный опрос
