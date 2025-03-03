@@ -47,6 +47,7 @@ public class Ads : BasePlugin
     // Кеш для результатов опросов серверов
     // Ключ – (ip, port), значение – последний сформированный текст (или пусто, если ошибка)
     private readonly Dictionary<(string, int), string> _serverStatusCache = new();
+    private readonly Dictionary<(string, int), string> _serverStatusCacheConsole = new();
 
     // Пользовательские данные по слотам
     private readonly User?[] _users = new User?[66];
@@ -73,11 +74,9 @@ public class Ads : BasePlugin
         StartTimers();
         StartServerTimers();
 
-        if (hotReload)
-        {
-            foreach (var player in Utilities.GetPlayers())
-                _users[player.Slot] = new User();
-        }
+        if (!hotReload) return;
+        foreach (var player in Utilities.GetPlayers())
+            _users[player.Slot] = new User();
     }
 
     // --- События игрока ---
@@ -167,6 +166,9 @@ public class Ads : BasePlugin
                 case "Center":
                     PrintWrappedLine(HudDestination.Center, message);
                     break;
+                case "Console":
+                    PrintWrappedLine(HudDestination.Console, message);
+                    break;
             }
         }
     }
@@ -210,7 +212,7 @@ public class Ads : BasePlugin
             return;
 
         // Печатаем СТРОГО без заголовка, только контент
-        AnnounceServersToPlayer(controller, isAd: false);
+        AnnounceServersToPlayer(controller);
     }
 
     // Команда перезагрузки конфига
@@ -277,6 +279,7 @@ public class Ads : BasePlugin
             {
                 Console.WriteLine($"[Ads] {serverInfo.Ip}:{serverInfo.Port} -> info == null");
                 _serverStatusCache.Remove((serverInfo.Ip, serverInfo.Port));
+                _serverStatusCacheConsole.Remove((serverInfo.Ip, serverInfo.Port));
                 return false;
             }
 
@@ -287,14 +290,23 @@ public class Ads : BasePlugin
                 .Replace("{SERVER_MAP}", info.Map.Trim())
                 .Replace("{SERVER_PLAYERS}", (info.Players - info.Bots < 0 ? 0 : info.Players - info.Bots).ToString())
                 .Replace("{SERVER_MAXPLAYERS}", info.MaxPlayers.ToString());
+            
+            var msgConsole = serverInfo.MessageTemplateConsole
+                .Replace("{SERVER_IP}", serverInfo.Ip)
+                .Replace("{SERVER_PORT}", serverInfo.Port.ToString())
+                .Replace("{SERVER_MAP}", info.Map.Trim())
+                .Replace("{SERVER_PLAYERS}", (info.Players - info.Bots < 0 ? 0 : info.Players - info.Bots).ToString())
+                .Replace("{SERVER_MAXPLAYERS}", info.MaxPlayers.ToString());
 
             _serverStatusCache[(serverInfo.Ip, serverInfo.Port)] = ProcessMessage(msg, 0);
+            _serverStatusCacheConsole[(serverInfo.Ip, serverInfo.Port)] = ProcessMessage(msgConsole, 0);
             return true;
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[Ads] Ошибка опроса {serverInfo.Ip}:{serverInfo.Port} => {ex.Message}");
             _serverStatusCache.Remove((serverInfo.Ip, serverInfo.Port));
+            _serverStatusCacheConsole.Remove((serverInfo.Ip, serverInfo.Port));
             return false;
         }
     }
@@ -320,13 +332,20 @@ public class Ads : BasePlugin
             if (!string.IsNullOrEmpty(msg))
                 PrintWrappedLine(HudDestination.Chat, msg);
         }
+
+        foreach (var pair in _serverStatusCacheConsole)
+        {
+            var msg = pair.Value;
+            if (!string.IsNullOrEmpty(msg))
+                PrintWrappedLine(HudDestination.Console, msg);
+        }
     }
 
     /// <summary>Анонсируем ОДНОМУ игроку (без заголовка, если isAd=false) список серверов из кеша.</summary>
-    private void AnnounceServersToPlayer(CCSPlayerController controller, bool isAd)
+    private void AnnounceServersToPlayer(CCSPlayerController controller)
     {
         // Если реклама и есть заголовок — выводим, иначе пропускаем
-        if (isAd && !string.IsNullOrEmpty(Config.TitleAnnounceServers))
+        if (!string.IsNullOrEmpty(Config.TitleAnnounceServers))
         {
             PrintWrappedLine(HudDestination.Chat, Config.TitleAnnounceServers, controller);
         }
@@ -339,6 +358,13 @@ public class Ads : BasePlugin
             {
                 PrintWrappedLine(HudDestination.Chat, msg, controller, true);
             }
+        }
+        
+        foreach (var pair in _serverStatusCacheConsole)
+        {
+            var msg = pair.Value;
+            if (!string.IsNullOrEmpty(msg))
+                PrintWrappedLine(HudDestination.Console, msg);
         }
     }
 
@@ -405,16 +431,21 @@ public class Ads : BasePlugin
                          .Where(u => !privateMsg && !u.IsBot && u.IsValid))
             {
                 var processed = ProcessMessage(message, player.SteamID);
-                if (destination == HudDestination.Chat)
+
+                switch (destination)
                 {
-                    player.PrintToChat(processed);
-                }
-                else
-                {
-                    if (Config.PrintToCenterHtml == true)
-                        SetHtmlPrintSettings(player, processed);
-                    else
-                        player.PrintToCenter(processed);
+                    case HudDestination.Chat:
+                        player.PrintToChat(processed);
+                        break;
+                    case HudDestination.Console:
+                        player.PrintToConsole(processed);
+                        break;
+                    default:
+                        if (Config.PrintToCenterHtml == true)
+                            SetHtmlPrintSettings(player, processed);
+                        else
+                            player.PrintToCenter(processed);
+                        break;
                 }
             }
         }
@@ -582,7 +613,8 @@ public class Ads : BasePlugin
                     {
                         Ip = "127.0.0.1",
                         Port = 27015,
-                        MessageTemplate = "{SERVER_IP}:{SERVER_PORT} - {SERVER_MAP} | {SERVER_PLAYERS}/{SERVER_MAXPLAYERS}"
+                        MessageTemplate = "{SERVER_IP}:{SERVER_PORT} - {SERVER_MAP} | {SERVER_PLAYERS}/{SERVER_MAXPLAYERS}",
+                        MessageTemplateConsole = "{SERVER_IP}:{SERVER_PORT} - {SERVER_MAP} | {SERVER_PLAYERS}/{SERVER_MAXPLAYERS}"
                     }
                 }
             }
@@ -693,4 +725,5 @@ public class ServerData
     public string Ip { get; set; } = "";
     public int Port { get; set; }
     public string MessageTemplate { get; set; } = "";
+    public string MessageTemplateConsole { get; set; } = "";
 }
