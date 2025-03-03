@@ -35,10 +35,10 @@ public class Ads : BasePlugin
 {
     public override string ModuleAuthor => "thesamefabius & Armatura";
     public override string ModuleName => "Advertisement";
-    public override string ModuleVersion => "v1.2.0";
+    public override string ModuleVersion => "v1.2.1";
 
-    private readonly List<Timer> _timers = new();
-    private readonly List<Timer> _serverTimers = new();
+    private readonly List<Timer> _timers = [];
+    private readonly List<Timer> _serverTimers = [];
 
     // Для определения страны/города
     private readonly Dictionary<ulong, string> _playerIsoCode = new();
@@ -47,7 +47,7 @@ public class Ads : BasePlugin
     // Кеш для результатов опросов серверов
     // Ключ – (ip, port), значение – последний сформированный текст (или пусто, если ошибка)
     private readonly Dictionary<(string, int), string> _serverStatusCache = new();
-    private readonly Dictionary<(string, int), string> _serverStatusCacheConsole = new();
+    private readonly Dictionary<(string, int), string> _serverStatusCacheTemplate = new();
 
     // Пользовательские данные по слотам
     private readonly User?[] _users = new User?[66];
@@ -61,6 +61,7 @@ public class Ads : BasePlugin
 
         // Регистрируем различные события
         RegisterEventHandler<EventPlayerConnectFull>(EventPlayerConnectFull);
+        RegisterEventHandler<EventPlayerDisconnect>(EventPlayerDisconnectPre, HookMode.Pre);
         RegisterEventHandler<EventPlayerDisconnect>(EventPlayerDisconnect);
 
         RegisterListener<Listeners.OnClientAuthorized>(OnClientAuthorized);
@@ -75,6 +76,7 @@ public class Ads : BasePlugin
         StartServerTimers();
 
         if (!hotReload) return;
+        
         foreach (var player in Utilities.GetPlayers())
             _users[player.Slot] = new User();
     }
@@ -86,9 +88,42 @@ public class Ads : BasePlugin
         var player = ev.Userid;
         if (player is null) return HookResult.Continue;
 
+        if (!string.IsNullOrEmpty(Config.DisconnectMessage))
+        {
+            if (_playerIsoCode.TryGetValue(player.SteamID, out var country) &&
+                _playerCity.TryGetValue(player.SteamID, out var city))
+            {
+                city = string.IsNullOrEmpty(city) ? "Unknown" : city; // Если город не найден, заменить на "Unknown"
+
+                var connectMsg = Config.DisconnectMessage
+                    .Replace("{PLAYERNAME}", player.PlayerName)
+                    .Replace("{COUNTRY}", country)
+                    .Replace("{CITY}", city);
+
+                // Всем игрокам:
+                PrintWrappedLine(HudDestination.Chat, connectMsg);
+            }
+            else
+            {
+                var connectMsg = Config.DisconnectMessage
+                    .Replace("{PLAYERNAME}", player.PlayerName)
+                    .Replace("{COUNTRY}", "")
+                    .Replace("{CITY}", "");
+                
+                // Всем игрокам:
+                PrintWrappedLine(HudDestination.Chat, connectMsg);
+            }
+        }
+
         _playerIsoCode.Remove(player.SteamID);
         _playerCity.Remove(player.SteamID);
 
+        return HookResult.Continue;
+    }
+    
+    private HookResult EventPlayerDisconnectPre(EventPlayerDisconnect ev, GameEventInfo info)
+    {
+        info.DontBroadcast = true;
         return HookResult.Continue;
     }
 
@@ -124,7 +159,17 @@ public class Ads : BasePlugin
                     .Replace("{CITY}", city);
 
                 // Всем игрокам:
-                PrintWrappedLine(HudDestination.Chat, connectMsg, player);
+                PrintWrappedLine(HudDestination.Chat, connectMsg);
+            }
+            else
+            {
+                var connectMsg = Config.ConnectAnnounce
+                    .Replace("{PLAYERNAME}", player.PlayerName)
+                    .Replace("{COUNTRY}", "")
+                    .Replace("{CITY}", "");
+                
+                // Всем игрокам:
+                PrintWrappedLine(HudDestination.Chat, connectMsg);
             }
         }
 
@@ -136,8 +181,10 @@ public class Ads : BasePlugin
         var welcomeMsg = Config.WelcomeMessage;
         var msg = welcomeMsg.Message
             .Replace("{PLAYERNAME}", player.PlayerName);
+        
+        HudDestination type = Config.WelcomeMessage.MessageType == 0 ? HudDestination.Chat : HudDestination.Center;
 
-        AddTimer(Config.WelcomeMessage.DisplayDelay, () => { PrintWrappedLine(0, msg, player, true); });
+        AddTimer(Config.WelcomeMessage.DisplayDelay, () => { PrintWrappedLine(type, msg, player, true); });
 
         return HookResult.Continue;
     }
@@ -195,7 +242,7 @@ public class Ads : BasePlugin
             }
 
             if (print)
-                AnnounceServersInChat(isAd: true);
+                AnnounceServersInChat();
         }, TimerFlags.REPEAT));
     }
 
@@ -229,16 +276,19 @@ public class Ads : BasePlugin
         _serverTimers.Clear();
 
         _serverStatusCache.Clear(); // очистим кеш при перезагрузке
+        _serverStatusCacheTemplate.Clear(); // очистим кеш при перезагрузке
+        
+        InitialServerQuery();
 
         // Повторно подгрузим язык/город для текущих игроков
         foreach (var player in Utilities.GetPlayers())
         {
-            if (player.IpAddress == null || player.AuthorizedSteamID == null)
+            if (player.IpAddress == null || player.IsBot || !player.IsValid)
                 continue;
 
             var ip = player.IpAddress.Split(':')[0];
-            _playerIsoCode[player.AuthorizedSteamID.SteamId64] = GetPlayerIsoCode(ip);
-            _playerCity[player.AuthorizedSteamID.SteamId64] = GetPlayerCity(ip);
+            _playerIsoCode[player.SteamID] = GetPlayerIsoCode(ip);
+            _playerCity[player.SteamID] = GetPlayerCity(ip);
         }
 
         // После Reload заново делаем начальный опрос
@@ -279,7 +329,7 @@ public class Ads : BasePlugin
             {
                 Console.WriteLine($"[Ads] {serverInfo.Ip}:{serverInfo.Port} -> info == null");
                 _serverStatusCache.Remove((serverInfo.Ip, serverInfo.Port));
-                _serverStatusCacheConsole.Remove((serverInfo.Ip, serverInfo.Port));
+                _serverStatusCacheTemplate.Remove((serverInfo.Ip, serverInfo.Port));
                 return false;
             }
 
@@ -290,7 +340,6 @@ public class Ads : BasePlugin
                 .Replace("{SERVER_MAP}", info.Map.Trim())
                 .Replace("{SERVER_PLAYERS}", (info.Players - info.Bots < 0 ? 0 : info.Players - info.Bots).ToString())
                 .Replace("{SERVER_MAXPLAYERS}", info.MaxPlayers.ToString());
-            
             var msgConsole = serverInfo.MessageTemplateConsole
                 .Replace("{SERVER_IP}", serverInfo.Ip)
                 .Replace("{SERVER_PORT}", serverInfo.Port.ToString())
@@ -299,14 +348,14 @@ public class Ads : BasePlugin
                 .Replace("{SERVER_MAXPLAYERS}", info.MaxPlayers.ToString());
 
             _serverStatusCache[(serverInfo.Ip, serverInfo.Port)] = ProcessMessage(msg, 0);
-            _serverStatusCacheConsole[(serverInfo.Ip, serverInfo.Port)] = ProcessMessage(msgConsole, 0);
+            _serverStatusCacheTemplate[(serverInfo.Ip, serverInfo.Port)] = ProcessMessage(msgConsole, 0);
             return true;
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[Ads] Ошибка опроса {serverInfo.Ip}:{serverInfo.Port} => {ex.Message}");
             _serverStatusCache.Remove((serverInfo.Ip, serverInfo.Port));
-            _serverStatusCacheConsole.Remove((serverInfo.Ip, serverInfo.Port));
+            _serverStatusCacheTemplate.Remove((serverInfo.Ip, serverInfo.Port));
             return false;
         }
     }
@@ -314,13 +363,13 @@ public class Ads : BasePlugin
     // --- Вывод списка серверов ---
 
     /// <summary>Анонсируем ВСЕМ игрокам (либо с заголовком, если isAd=true) список серверов из кеша.</summary>
-    private void AnnounceServersInChat(bool isAd)
+    private void AnnounceServersInChat()
     {
         var players = Utilities.GetPlayers().Where(u => !u.IsBot && u.IsValid);
         if (!players.Any()) return; // никто не увидит
 
         // Если в конфиге прописан заголовок и это реклама — выведем его
-        if (isAd && !string.IsNullOrEmpty(Config.TitleAnnounceServers))
+        if (!string.IsNullOrEmpty(Config.TitleAnnounceServers))
         {
             PrintWrappedLine(HudDestination.Chat, Config.TitleAnnounceServers!);
         }
@@ -332,8 +381,8 @@ public class Ads : BasePlugin
             if (!string.IsNullOrEmpty(msg))
                 PrintWrappedLine(HudDestination.Chat, msg);
         }
-
-        foreach (var pair in _serverStatusCacheConsole)
+        
+        foreach (var pair in _serverStatusCacheTemplate)
         {
             var msg = pair.Value;
             if (!string.IsNullOrEmpty(msg))
@@ -347,7 +396,7 @@ public class Ads : BasePlugin
         // Если реклама и есть заголовок — выводим, иначе пропускаем
         if (!string.IsNullOrEmpty(Config.TitleAnnounceServers))
         {
-            PrintWrappedLine(HudDestination.Chat, Config.TitleAnnounceServers, controller);
+            PrintWrappedLine(HudDestination.Chat, Config.TitleAnnounceServers, controller, true);
         }
 
         // Выводим строки из кеша
@@ -360,11 +409,13 @@ public class Ads : BasePlugin
             }
         }
         
-        foreach (var pair in _serverStatusCacheConsole)
+        foreach (var pair in _serverStatusCacheTemplate)
         {
             var msg = pair.Value;
             if (!string.IsNullOrEmpty(msg))
-                PrintWrappedLine(HudDestination.Console, msg);
+            {
+                PrintWrappedLine(HudDestination.Console, msg, controller, true);
+            }
         }
     }
 
@@ -405,22 +456,21 @@ public class Ads : BasePlugin
         // Если это личное приветствие
         if (connectPlayer != null && connectPlayer is { IsValid: true, IsBot: false } && privateMsg)
         {
-            var welcomeMessage = Config.WelcomeMessage;
-            if (welcomeMessage == null || string.IsNullOrEmpty(welcomeMessage.Message)) return;
+            var processed = ProcessMessage(message, connectPlayer.SteamID);
 
-            var processed = ProcessMessage(message, connectPlayer.SteamID)
-                .Replace("{PLAYERNAME}", connectPlayer.PlayerName);
-
-            switch (welcomeMessage.MessageType)
+            switch (destination)
             {
-                case MessageType.Chat:
+                case HudDestination.Chat:
                     connectPlayer.PrintToChat(processed);
                     break;
-                case MessageType.Center:
-                    connectPlayer.PrintToChat(processed);
+                case HudDestination.Console:
+                    connectPlayer.PrintToConsole(processed);
                     break;
-                case MessageType.CenterHtml:
-                    SetHtmlPrintSettings(connectPlayer, processed);
+                default:
+                    if (Config.PrintToCenterHtml == true)
+                        SetHtmlPrintSettings(connectPlayer, processed);
+                    else
+                        connectPlayer.PrintToCenter(processed);
                     break;
             }
         }
@@ -518,12 +568,11 @@ public class Ads : BasePlugin
             .Replace("\n", "\u2029");
 
         // Проверяем {SERVER_MAP}, чтобы тоже подставлять кастомные названия карт
-        if (Config.MapsName != null)
+        if (Config.MapsName == null) return replacedMessage.ReplaceColorTags();
+        
+        foreach (var (key, niceName) in Config.MapsName)
         {
-            foreach (var (key, niceName) in Config.MapsName)
-            {
-                replacedMessage = Regex.Replace(replacedMessage, $@"\b{Regex.Escape(key)}\b", niceName);
-            }
+            replacedMessage = Regex.Replace(replacedMessage, $@"\b{Regex.Escape(key)}\b", niceName);
         }
 
         return replacedMessage.ReplaceColorTags();
@@ -556,9 +605,10 @@ public class Ads : BasePlugin
                 Message = "Welcome, {BLUE}{PLAYERNAME}",
                 DisplayDelay = 5
             },
-            Ads = new List<Advertisement>
-            {
-                new()
+            DisconnectMessage = "Goodbye, {PLAYERNAME}",
+            Ads =
+            [
+                new Advertisement
                 {
                     Interval = 35,
                     Messages = new List<Dictionary<string, string>>
@@ -567,7 +617,8 @@ public class Ads : BasePlugin
                         new() { ["Chat"] = "{current_time}" }
                     }
                 },
-                new()
+
+                new Advertisement
                 {
                     Interval = 40,
                     Messages = new List<Dictionary<string, string>>
@@ -576,7 +627,7 @@ public class Ads : BasePlugin
                         new() { ["Chat"] = "Section 2 Chat 2", ["Center"] = "Section 2 Center 1" }
                     }
                 }
-            },
+            ],
             DefaultLang = "US",
             LanguageMessages = new Dictionary<string, Dictionary<string, string>>
             {
@@ -604,19 +655,20 @@ public class Ads : BasePlugin
             },
             ConnectAnnounce = "Игрок {PLAYERNAME} зашёл из {COUNTRY}, {CITY}",
             TitleAnnounceServers = "Список серверов:",
-            Servers = new()
+            Servers = new ServerInfo
             {
                 Interval = 65,
-                List = new List<ServerData>
-                {
-                    new()
+                List =
+                [
+                    new ServerData
                     {
                         Ip = "127.0.0.1",
                         Port = 27015,
-                        MessageTemplate = "{SERVER_IP}:{SERVER_PORT} - {SERVER_MAP} | {SERVER_PLAYERS}/{SERVER_MAXPLAYERS}",
+                        MessageTemplate =
+                            "{SERVER_IP}:{SERVER_PORT} - {SERVER_MAP} | {SERVER_PLAYERS}/{SERVER_MAXPLAYERS}",
                         MessageTemplateConsole = "{SERVER_IP}:{SERVER_PORT} - {SERVER_MAP} | {SERVER_PLAYERS}/{SERVER_MAXPLAYERS}"
                     }
-                }
+                ]
             }
         };
 
@@ -675,6 +727,7 @@ public class Config
     public bool? ShowHtmlWhenDead { get; set; }
     public bool Debug { get; set; } = false;
     public WelcomeMessage? WelcomeMessage { get; init; }
+    public string? DisconnectMessage { get; init; }
     public List<Advertisement>? Ads { get; init; }
     public List<string>? Panel { get; init; }
     public string? DefaultLang { get; init; }
@@ -710,7 +763,8 @@ public enum MessageType
 {
     Chat = 0,
     Center,
-    CenterHtml
+    CenterHtml,
+    Console
 }
 
 // Данные о внешнем сервере
