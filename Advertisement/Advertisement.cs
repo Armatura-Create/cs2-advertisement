@@ -39,7 +39,7 @@ public class Ads : BasePlugin
 
     private readonly List<Timer> _timers = [];
     private readonly List<Timer> _serverTimers = [];
-    
+
     private readonly Dictionary<ulong, Timer> _connectionTimers = new();
 
     // Для определения страны/города
@@ -78,48 +78,54 @@ public class Ads : BasePlugin
         StartServerTimers();
 
         if (!hotReload) return;
-        
+
+        _playerIsoCode.Clear();
+        _playerCity.Clear();
+
         foreach (var player in Utilities.GetPlayers())
-            _users[player.Slot] = new User();
+        {
+            if (player.IsBot || !player.IsValid || player.AuthorizedSteamID == null) continue;
+            OnClientAuthorized(player.Slot, player.AuthorizedSteamID);
+        }
     }
 
     // --- События игрока ---
-
     private HookResult EventPlayerDisconnect(EventPlayerDisconnect ev, GameEventInfo info)
     {
         var player = ev.Userid;
         if (player is null || player.IsBot) return HookResult.Continue;
 
         // Если игрок вышел до отправки сообщения о входе, отменяем таймер и не показываем сообщение
-        if (_connectionTimers.ContainsKey(player.SteamID))
+        if (_connectionTimers.TryGetValue(player.SteamID, out var value))
         {
-            _connectionTimers[player.SteamID].Kill();
+            value.Kill();
             _connectionTimers.Remove(player.SteamID);
-            return HookResult.Continue; // Прерываем обработку выхода
         }
-
-        if (!string.IsNullOrEmpty(Config.DisconnectMessage))
+        else
         {
-            if (_playerIsoCode.TryGetValue(player.SteamID, out var country) &&
-                _playerCity.TryGetValue(player.SteamID, out var city))
+            if (!string.IsNullOrEmpty(Config.DisconnectMessage))
             {
-                city = string.IsNullOrEmpty(city) ? "Unknown" : city;
+                if (_playerIsoCode.TryGetValue(player.SteamID, out var country) &&
+                    _playerCity.TryGetValue(player.SteamID, out var city))
+                {
+                    city = string.IsNullOrEmpty(city) ? "Unknown" : city;
 
-                var disconnectMsg = Config.DisconnectMessage
-                    .Replace("{PLAYERNAME}", player.PlayerName)
-                    .Replace("{COUNTRY}", country)
-                    .Replace("{CITY}", city);
+                    var disconnectMsg = Config.DisconnectMessage
+                        .Replace("{PLAYERNAME}", player.PlayerName)
+                        .Replace("{COUNTRY}", country)
+                        .Replace("{CITY}", city);
 
-                PrintWrappedLine(HudDestination.Chat, disconnectMsg);
-            }
-            else
-            {
-                var disconnectMsg = Config.DisconnectMessage
-                    .Replace("{PLAYERNAME}", player.PlayerName)
-                    .Replace("{COUNTRY}", "")
-                    .Replace("{CITY}", "");
+                    PrintWrappedLine(HudDestination.Chat, disconnectMsg);
+                }
+                else
+                {
+                    var disconnectMsg = Config.DisconnectMessage
+                        .Replace("{PLAYERNAME}", player.PlayerName)
+                        .Replace("{COUNTRY}", "")
+                        .Replace("{CITY}", "");
 
-                PrintWrappedLine(HudDestination.Chat, disconnectMsg);
+                    PrintWrappedLine(HudDestination.Chat, disconnectMsg);
+                }
             }
         }
 
@@ -128,7 +134,7 @@ public class Ads : BasePlugin
 
         return HookResult.Continue;
     }
-    
+
     private HookResult EventPlayerDisconnectPre(EventPlayerDisconnect ev, GameEventInfo info)
     {
         info.DontBroadcast = true;
@@ -163,36 +169,37 @@ public class Ads : BasePlugin
         // Устанавливаем таймер на отправку сообщения через 3 секунды
         _connectionTimers[player.SteamID] = AddTimer(3.0f, () =>
         {
-        // Если ConnectAnnounce не пуст, оповестим всех о стране/городе
-        if (!string.IsNullOrEmpty(Config.ConnectAnnounce))
-        {
-            if (!player.IsValid) return; // Проверяем, что игрок не вышел
-            
-            if (_playerIsoCode.TryGetValue(player.SteamID, out var country) &&
-                _playerCity.TryGetValue(player.SteamID, out var city))
+            // Если ConnectAnnounce не пуст, оповестим всех о стране/городе
+            if (!string.IsNullOrEmpty(Config.ConnectAnnounce))
             {
-                city = string.IsNullOrEmpty(city) ? "Unknown" : city; // Если город не найден, заменить на "Unknown"
+                if (!player.IsValid) return; // Проверяем, что игрок не вышел
 
-                var connectMsg = Config.ConnectAnnounce
-                    .Replace("{PLAYERNAME}", player.PlayerName)
-                    .Replace("{COUNTRY}", country)
-                    .Replace("{CITY}", city);
+                if (_playerIsoCode.TryGetValue(player.SteamID, out var country) &&
+                    _playerCity.TryGetValue(player.SteamID, out var city))
+                {
+                    city = string.IsNullOrEmpty(city) ? "Unknown" : city; // Если город не найден, заменить на "Unknown"
 
-                // Всем игрокам:
-                PrintWrappedLine(HudDestination.Chat, connectMsg);
+                    var connectMsg = Config.ConnectAnnounce
+                        .Replace("{PLAYERNAME}", player.PlayerName)
+                        .Replace("{COUNTRY}", country)
+                        .Replace("{CITY}", city);
+
+                    // Всем игрокам:
+                    PrintWrappedLine(HudDestination.Chat, connectMsg);
+                }
+                else
+                {
+                    var connectMsg = Config.ConnectAnnounce
+                        .Replace("{PLAYERNAME}", player.PlayerName)
+                        .Replace("{COUNTRY}", "")
+                        .Replace("{CITY}", "");
+
+                    // Всем игрокам:
+                    PrintWrappedLine(HudDestination.Chat, connectMsg);
+                }
             }
-            else
-            {
-                var connectMsg = Config.ConnectAnnounce
-                    .Replace("{PLAYERNAME}", player.PlayerName)
-                    .Replace("{COUNTRY}", "")
-                    .Replace("{CITY}", "");
-                
-                // Всем игрокам:
-                PrintWrappedLine(HudDestination.Chat, connectMsg);
-            }
-        }
-        _connectionTimers.Remove(player.SteamID); // Удаляем таймер после отправки сообщения
+
+            _connectionTimers.Remove(player.SteamID); // Удаляем таймер после отправки сообщения
         });
 
         // Если WelcomeMessage отсутствует или пустая, ничего не выводим
@@ -203,7 +210,7 @@ public class Ads : BasePlugin
         var welcomeMsg = Config.WelcomeMessage;
         var msg = welcomeMsg.Message
             .Replace("{PLAYERNAME}", player.PlayerName);
-        
+
         HudDestination type = Config.WelcomeMessage.MessageType == 0 ? HudDestination.Chat : HudDestination.Center;
 
         AddTimer(Config.WelcomeMessage.DisplayDelay, () => { PrintWrappedLine(type, msg, player, true); });
@@ -283,7 +290,7 @@ public class Ads : BasePlugin
         // Печатаем СТРОГО без заголовка, только контент
         AnnounceServersToPlayer(controller);
     }
-    
+
     [CommandHelper(whoCanExecute: CommandUsage.SERVER_ONLY)]
     [ConsoleCommand("css_announce_restart", "Сказать всем, что будет рестарт через N секунд")]
     public void AnnounceRestart(CCSPlayerController? controller, CommandInfo command)
@@ -294,6 +301,7 @@ public class Ads : BasePlugin
             {
                 controller.PrintToChat("[ERROR] Use: css_announce_restart <seconds>");
             }
+
             return;
         }
 
@@ -329,7 +337,7 @@ public class Ads : BasePlugin
 
         _serverStatusCache.Clear(); // очистим кеш при перезагрузке
         _serverStatusCacheTemplate.Clear(); // очистим кеш при перезагрузке
-        
+
         InitialServerQuery();
 
         // Повторно подгрузим язык/город для текущих игроков
@@ -433,7 +441,7 @@ public class Ads : BasePlugin
             if (!string.IsNullOrEmpty(msg))
                 PrintWrappedLine(HudDestination.Chat, msg);
         }
-        
+
         foreach (var pair in _serverStatusCacheTemplate)
         {
             var msg = pair.Value;
@@ -460,7 +468,7 @@ public class Ads : BasePlugin
                 PrintWrappedLine(HudDestination.Chat, msg, controller, true);
             }
         }
-        
+
         foreach (var pair in _serverStatusCacheTemplate)
         {
             var msg = pair.Value;
@@ -606,7 +614,7 @@ public class Ads : BasePlugin
     private string ReplaceMessageTags(string message)
     {
         var mapName = NativeAPI.GetMapName();
-    
+
         // Основные замены
         var replacedMessage = message
             .Replace("{MAP}", mapName)
@@ -621,7 +629,7 @@ public class Ads : BasePlugin
 
         // Проверяем {SERVER_MAP}, чтобы тоже подставлять кастомные названия карт
         if (Config.MapsName == null) return replacedMessage.ReplaceColorTags();
-        
+
         foreach (var (key, niceName) in Config.MapsName)
         {
             replacedMessage = Regex.Replace(replacedMessage, $@"\b{Regex.Escape(key)}\b", niceName);
@@ -719,7 +727,8 @@ public class Ads : BasePlugin
                         Port = 27015,
                         MessageTemplate =
                             "{SERVER_IP}:{SERVER_PORT} - {SERVER_MAP} | {SERVER_PLAYERS}/{SERVER_MAXPLAYERS}",
-                        MessageTemplateConsole = "{SERVER_IP}:{SERVER_PORT} - {SERVER_MAP} | {SERVER_PLAYERS}/{SERVER_MAXPLAYERS}"
+                        MessageTemplateConsole =
+                            "{SERVER_IP}:{SERVER_PORT} - {SERVER_MAP} | {SERVER_PLAYERS}/{SERVER_MAXPLAYERS}"
                     }
                 ]
             }
