@@ -35,10 +35,12 @@ public class Ads : BasePlugin
 {
     public override string ModuleAuthor => "thesamefabius & Armatura";
     public override string ModuleName => "Advertisement";
-    public override string ModuleVersion => "v1.2.1";
+    public override string ModuleVersion => "v1.2.2";
 
     private readonly List<Timer> _timers = [];
     private readonly List<Timer> _serverTimers = [];
+    
+    private readonly Dictionary<ulong, Timer> _connectionTimers = new();
 
     // Для определения страны/города
     private readonly Dictionary<ulong, string> _playerIsoCode = new();
@@ -86,32 +88,38 @@ public class Ads : BasePlugin
     private HookResult EventPlayerDisconnect(EventPlayerDisconnect ev, GameEventInfo info)
     {
         var player = ev.Userid;
-        if (player is null) return HookResult.Continue;
+        if (player is null || player.IsBot) return HookResult.Continue;
+
+        // Если игрок вышел до отправки сообщения о входе, отменяем таймер и не показываем сообщение
+        if (_connectionTimers.ContainsKey(player.SteamID))
+        {
+            _connectionTimers[player.SteamID].Kill();
+            _connectionTimers.Remove(player.SteamID);
+            return HookResult.Continue; // Прерываем обработку выхода
+        }
 
         if (!string.IsNullOrEmpty(Config.DisconnectMessage))
         {
             if (_playerIsoCode.TryGetValue(player.SteamID, out var country) &&
                 _playerCity.TryGetValue(player.SteamID, out var city))
             {
-                city = string.IsNullOrEmpty(city) ? "Unknown" : city; // Если город не найден, заменить на "Unknown"
+                city = string.IsNullOrEmpty(city) ? "Unknown" : city;
 
-                var connectMsg = Config.DisconnectMessage
+                var disconnectMsg = Config.DisconnectMessage
                     .Replace("{PLAYERNAME}", player.PlayerName)
                     .Replace("{COUNTRY}", country)
                     .Replace("{CITY}", city);
 
-                // Всем игрокам:
-                PrintWrappedLine(HudDestination.Chat, connectMsg);
+                PrintWrappedLine(HudDestination.Chat, disconnectMsg);
             }
             else
             {
-                var connectMsg = Config.DisconnectMessage
+                var disconnectMsg = Config.DisconnectMessage
                     .Replace("{PLAYERNAME}", player.PlayerName)
                     .Replace("{COUNTRY}", "")
                     .Replace("{CITY}", "");
-                
-                // Всем игрокам:
-                PrintWrappedLine(HudDestination.Chat, connectMsg);
+
+                PrintWrappedLine(HudDestination.Chat, disconnectMsg);
             }
         }
 
@@ -142,12 +150,24 @@ public class Ads : BasePlugin
     private HookResult EventPlayerConnectFull(EventPlayerConnectFull ev, GameEventInfo info)
     {
         var player = ev.Userid;
-        if (player is null || !player.IsValid)
+        if (player is null || !player.IsValid || player.IsBot)
             return HookResult.Continue;
 
+        // Если уже существует таймер, отменяем его (на случай повторного входа)
+        if (_connectionTimers.ContainsKey(player.SteamID))
+        {
+            _connectionTimers[player.SteamID].Kill();
+            _connectionTimers.Remove(player.SteamID);
+        }
+
+        // Устанавливаем таймер на отправку сообщения через 3 секунды
+        _connectionTimers[player.SteamID] = AddTimer(3.0f, () =>
+        {
         // Если ConnectAnnounce не пуст, оповестим всех о стране/городе
         if (!string.IsNullOrEmpty(Config.ConnectAnnounce))
         {
+            if (!player.IsValid) return; // Проверяем, что игрок не вышел
+            
             if (_playerIsoCode.TryGetValue(player.SteamID, out var country) &&
                 _playerCity.TryGetValue(player.SteamID, out var city))
             {
@@ -172,6 +192,8 @@ public class Ads : BasePlugin
                 PrintWrappedLine(HudDestination.Chat, connectMsg);
             }
         }
+        _connectionTimers.Remove(player.SteamID); // Удаляем таймер после отправки сообщения
+        });
 
         // Если WelcomeMessage отсутствует или пустая, ничего не выводим
         if (Config.WelcomeMessage == null || string.IsNullOrEmpty(Config.WelcomeMessage.Message))
@@ -261,6 +283,36 @@ public class Ads : BasePlugin
         // Печатаем СТРОГО без заголовка, только контент
         AnnounceServersToPlayer(controller);
     }
+    
+    [CommandHelper(whoCanExecute: CommandUsage.SERVER_ONLY)]
+    [ConsoleCommand("css_announce_restart", "Сказать всем, что будет рестарт через N секунд")]
+    public void AnnounceRestart(CCSPlayerController? controller, CommandInfo command)
+    {
+        if (command.ArgCount < 2 || !int.TryParse(command.ArgString, out var seconds) || seconds <= 0)
+        {
+            if (controller != null)
+            {
+                controller.PrintToChat("[ERROR] Use: css_announce_restart <seconds>");
+            }
+            return;
+        }
+
+        if (string.IsNullOrEmpty(Config.RestartMessage))
+        {
+            return;
+        }
+
+        // Форматируем секунды в MM:SS
+        var timeSpan = TimeSpan.FromSeconds(seconds);
+        var formattedTime = timeSpan.ToString(@"mm\:ss");
+
+        // Подставляем время в сообщение
+        var restartMessage = ProcessMessage(Config.RestartMessage, 0).Replace("{TIME_RESTART}", formattedTime);
+
+        // Выводим сообщение всем игрокам
+        PrintWrappedLine(HudDestination.Chat, restartMessage);
+    }
+
 
     // Команда перезагрузки конфига
     [RequiresPermissions("@css/root")]
@@ -606,6 +658,7 @@ public class Ads : BasePlugin
                 DisplayDelay = 5
             },
             DisconnectMessage = "Goodbye, {PLAYERNAME}",
+            RestartMessage = "Server will be restarted in {TIME_RESTART}!",
             Ads =
             [
                 new Advertisement
@@ -728,6 +781,7 @@ public class Config
     public bool Debug { get; set; } = false;
     public WelcomeMessage? WelcomeMessage { get; init; }
     public string? DisconnectMessage { get; init; }
+    public string? RestartMessage { get; set; }
     public List<Advertisement>? Ads { get; init; }
     public List<string>? Panel { get; init; }
     public string? DefaultLang { get; init; }
