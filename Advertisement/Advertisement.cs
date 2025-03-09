@@ -41,6 +41,7 @@ public class Ads : BasePlugin
     private readonly List<Timer> _serverTimers = [];
 
     private readonly Dictionary<ulong, Timer> _connectionTimers = new();
+    private readonly HashSet<ulong> _fullyConnectedPlayers = new();
 
     // Для определения страны/города
     private readonly Dictionary<ulong, string> _playerIsoCode = new();
@@ -101,34 +102,28 @@ public class Ads : BasePlugin
             value.Kill();
             _connectionTimers.Remove(player.SteamID);
         }
-        else
+        else if (_fullyConnectedPlayers.Contains(player.SteamID))
         {
-            if (!string.IsNullOrEmpty(Config.DisconnectMessage))
+            if (Config.LeaveMessages != null)
             {
-                if (_playerIsoCode.TryGetValue(player.SteamID, out var country) &&
-                    _playerCity.TryGetValue(player.SteamID, out var city))
+                _playerIsoCode.TryGetValue(player.SteamID, out var country);
+                _playerCity.TryGetValue(player.SteamID, out var city);
+                
+                foreach (var p in Utilities.GetPlayers()
+                             .Where(u => u is { IsBot: false, IsValid: true } && u.SteamID != player.SteamID))
                 {
-                    city = string.IsNullOrEmpty(city) ? "Unknown" : city;
-
-                    var disconnectMsg = Config.DisconnectMessage
-                        .Replace("{PLAYERNAME}", player.PlayerName)
-                        .Replace("{COUNTRY}", country)
-                        .Replace("{CITY}", city);
-
-                    PrintWrappedLine(HudDestination.Chat, disconnectMsg);
-                }
-                else
-                {
-                    var disconnectMsg = Config.DisconnectMessage
-                        .Replace("{PLAYERNAME}", player.PlayerName)
-                        .Replace("{COUNTRY}", "")
-                        .Replace("{CITY}", "");
-
-                    PrintWrappedLine(HudDestination.Chat, disconnectMsg);
+                    var message = GetRandomLocalizedMessage(Config.LeaveMessages, p.SteamID, player.PlayerName,
+                        country ?? "Unknown", city ?? "Unknown");
+                    
+                    if (!string.IsNullOrEmpty(message))
+                    {
+                        PrintWrappedLine(HudDestination.Chat, message, p, true);
+                    }
                 }
             }
         }
 
+        _fullyConnectedPlayers.Remove(player.SteamID);
         _playerIsoCode.Remove(player.SteamID);
         _playerCity.Remove(player.SteamID);
 
@@ -159,6 +154,8 @@ public class Ads : BasePlugin
         if (player is null || !player.IsValid || player.IsBot)
             return HookResult.Continue;
 
+        _fullyConnectedPlayers.Add(player.SteamID);
+
         // Если уже существует таймер, отменяем его (на случай повторного входа)
         if (_connectionTimers.ContainsKey(player.SteamID))
         {
@@ -170,32 +167,22 @@ public class Ads : BasePlugin
         _connectionTimers[player.SteamID] = AddTimer(3.0f, () =>
         {
             // Если ConnectAnnounce не пуст, оповестим всех о стране/городе
-            if (!string.IsNullOrEmpty(Config.ConnectAnnounce))
+            if (Config.JoinMessages != null)
             {
                 if (!player.IsValid) return; // Проверяем, что игрок не вышел
+                
+                _playerIsoCode.TryGetValue(player.SteamID, out var country);
+                _playerCity.TryGetValue(player.SteamID, out var city);
 
-                if (_playerIsoCode.TryGetValue(player.SteamID, out var country) &&
-                    _playerCity.TryGetValue(player.SteamID, out var city))
+                foreach (var p in Utilities.GetPlayers()
+                             .Where(u => u is { IsBot: false, IsValid: true }))
                 {
-                    city = string.IsNullOrEmpty(city) ? "Unknown" : city; // Если город не найден, заменить на "Unknown"
-
-                    var connectMsg = Config.ConnectAnnounce
-                        .Replace("{PLAYERNAME}", player.PlayerName)
-                        .Replace("{COUNTRY}", country)
-                        .Replace("{CITY}", city);
-
-                    // Всем игрокам:
-                    PrintWrappedLine(HudDestination.Chat, connectMsg);
-                }
-                else
-                {
-                    var connectMsg = Config.ConnectAnnounce
-                        .Replace("{PLAYERNAME}", player.PlayerName)
-                        .Replace("{COUNTRY}", "")
-                        .Replace("{CITY}", "");
-
-                    // Всем игрокам:
-                    PrintWrappedLine(HudDestination.Chat, connectMsg);
+                    var message = GetRandomLocalizedMessage(Config.JoinMessages, p.SteamID, player.PlayerName,
+                        country ?? "Unknown", city ?? "Unknown");
+                    if (!string.IsNullOrEmpty(message))
+                    {
+                        PrintWrappedLine(HudDestination.Chat, message, p, true);
+                    }
                 }
             }
 
@@ -216,6 +203,29 @@ public class Ads : BasePlugin
         AddTimer(Config.WelcomeMessage.DisplayDelay, () => { PrintWrappedLine(type, msg, player, true); });
 
         return HookResult.Continue;
+    }
+
+    private string GetRandomLocalizedMessage(Dictionary<string, List<string>>? messages, ulong steamId,
+        string playerName, string country, string city)
+    {
+        if (messages == null || messages.Count == 0) return string.Empty;
+
+        // Определяем язык игрока
+        var lang = Config.DefaultLang ?? "US";
+        if (_playerIsoCode.TryGetValue(steamId, out var playerLang) && messages.ContainsKey(playerLang))
+        {
+            lang = playerLang;
+        }
+
+        if (!messages.TryGetValue(lang, out var messageList) || messageList.Count == 0) return string.Empty;
+
+        var random = new Random();
+        var message = messageList[random.Next(messageList.Count)];
+
+        return message
+            .Replace("{PLAYERNAME}", playerName)
+            .Replace("{COUNTRY}", country)
+            .Replace("{CITY}", city);
     }
 
     // --- Основные таймеры ---
@@ -665,7 +675,6 @@ public class Ads : BasePlugin
                 Message = "Welcome, {BLUE}{PLAYERNAME}",
                 DisplayDelay = 5
             },
-            DisconnectMessage = "Goodbye, {PLAYERNAME}",
             RestartMessage = "Server will be restarted in {TIME_RESTART}!",
             Ads =
             [
@@ -714,7 +723,7 @@ public class Ads : BasePlugin
                 ["de_mirage"] = "Mirage",
                 ["de_dust"] = "Dust II"
             },
-            ConnectAnnounce = "Игрок {PLAYERNAME} зашёл из {COUNTRY}, {CITY}",
+
             TitleAnnounceServers = "Список серверов:",
             Servers = new ServerInfo
             {
@@ -789,7 +798,7 @@ public class Config
     public bool? ShowHtmlWhenDead { get; set; }
     public bool Debug { get; set; } = false;
     public WelcomeMessage? WelcomeMessage { get; init; }
-    public string? DisconnectMessage { get; init; }
+
     public string? RestartMessage { get; set; }
     public List<Advertisement>? Ads { get; init; }
     public List<string>? Panel { get; init; }
@@ -797,10 +806,11 @@ public class Config
     public Dictionary<string, Dictionary<string, string>>? LanguageMessages { get; init; }
     public Dictionary<string, string>? MapsName { get; init; }
 
-    // Новые поля
+    public Dictionary<string, List<string>>? JoinMessages { get; init; }
+    public Dictionary<string, List<string>>? LeaveMessages { get; init; }
+
     public string? TitleAnnounceServers { get; set; }
     public ServerInfo? Servers { get; init; }
-    public string? ConnectAnnounce { get; set; }
 }
 
 // Параметры приветствия
